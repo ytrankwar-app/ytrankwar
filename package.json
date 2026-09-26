@@ -1,0 +1,39 @@
+{
+  "name": "ytrankwar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "tsx db/migrate.ts",
+    "db:seed": "tsx db/seed.ts",
+    "test": "tsx --test test/*.test.ts",
+    "check:youtube-key": "tsx scripts/check-youtube-key.ts",
+    "db:refresh-stats": "tsx scripts/refresh-channel-stats.ts",
+    "d1:migrate:local": "wrangler d1 migrations apply ytrankwar-db --local",
+    "d1:migrate:remote": "wrangler d1 migrations apply ytrankwar-db --remote",
+    "workers:typecheck": "tsc --noEmit -p workers/tsconfig.json",
+    "workers:verify-concurrency": "sh workers/verify-concurrency-proof.sh"
+  },
+  "dependencies": {
+    "@opennextjs/cloudflare": "^1.20.6",
+    "better-sqlite3": "13.0.3",
+    "nanoid": "^5.1.16",
+    "next": "^16.3.6",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260914.1",
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "20.14.11",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "tsx": "^4.23.15",
+    "typescript": "5.5.4",
+    "wrangler": "^4.131.2"
+  }
+}

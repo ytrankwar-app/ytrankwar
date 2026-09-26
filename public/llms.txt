@@ -1,0 +1,32 @@
+# ytrankwar
+
+> ytrankwar is a YouTube channel "rank war" leaderboard platform. Creators list their YouTube channel for free, then optionally bid real money to hold a competitive position on the public leaderboard. Ranking is determined only by cumulative verified paid bid — never by subscriber count, views, or any other YouTube metric. Paid positions are promotional placements on ytrankwar only; they are not YouTube search rankings, recommendations, endorsements, or guarantees of views, subscribers, traffic, or sales, and ytrankwar is not affiliated with, sponsored by, or endorsed by YouTube or Google.
+
+## Key pages
+
+- [Homepage](/): the live leaderboard, the "Claim #1" quick-bid card, live visitor and total-channels counters, a separate referral-traffic leaderboard, and the free / premium "Add Channel" flow.
+- Channel profile pages at `/channel/{slug}`: one per listed channel, showing current rank, bid history, rank history, cached YouTube statistics, and the actions available to bid on or outbid that channel.
+
+## How ranking and bidding work
+
+- Listing a channel on ytrankwar is always free, and requires no account or sign-in of any kind.
+- A minimum $25 cumulative bid is required to hold a paid leaderboard position; taking an already-claimed position costs that position's current bid plus a minimum $1 increment. Ties on cumulative bid are broken in favor of whichever channel reached that total first.
+- There is no login. Submitting a channel returns a private "manage" credential that is the only thing authorizing bids or ownership verification on that channel afterward — bidding always raises that specific channel's own position, never someone else's.
+- Rank is derived live from cumulative verified bid at read time; it is never trusted from a cache for anything that affects money or standings.
+- A separate referral-traffic leaderboard tracks visits from each channel's shared link. This is a distinct, clearly-labeled metric that never affects the paid, bid-based ranking.
+
+## Public read-only API (JSON, safe to call without authentication)
+
+- `GET /api/leaderboard?category=&country=&limit=&offset=` — current ranked listings, optionally filtered by category or country.
+- `GET /api/leaderboard/referrals?limit=` — the separate referral-traffic leaderboard.
+- `GET /api/bids/next-price?rank=` — the price required to claim a given rank right now.
+- `GET /api/stats` — live visitor count and total channels added, for reference only.
+- `GET /api/channels/{id}` — a single channel's detail, bid history, and rank history.
+- `GET /r/{code}` — a channel's public referral link; redirects to its profile page and records a visit.
+
+## Notes for automated agents and LLMs
+
+- This deployment is a working prototype: payment processing and YouTube channel verification/statistics are mocked rather than live-integrated (see the project README for what's real vs. simulated), so figures such as subscriber counts, view counts, and bid histories may be synthetic demo data rather than real-world numbers.
+- `POST /api/channels` requires no authentication — anyone may list a channel. `POST /api/payments/*` and `POST /api/channels/{id}/verify`, however, require a private per-channel credential that only the channel's own creator holds; do not call them on a user's behalf without their explicit, in-the-moment request and their own credential.
+- Prefer `/api/leaderboard` for bulk ranking data over crawling every individual `/channel/{slug}` page.
+- There is no admin panel or user dashboard exposed on this site by design; channel verification and bid management both happen from the channel's own profile page.

@@ -1,0 +1,54 @@
+# Cloudflare deployment configuration.
+#
+# What's real here (verified against a local Cloudflare Workers + D1 +
+# Durable Objects runtime — see workers/verify-concurrency-proof.sh and the
+# README's "Cloudflare D1 + Durable Objects" section for exactly how):
+#   - the D1 database schema/migrations (migrations/0001_initial.sql,
+#     applied via `npm run d1:migrate:local` / `npm run d1:migrate:remote`)
+#   - the BidCoordinator Durable Object (workers/bid-coordinator.ts), the
+#     only place a bid is ever applied to a channel's listing
+#
+# What's NOT done yet — this app does not run on Cloudflare end-to-end:
+#   - the Next.js app itself still runs on Node (`next start`), reading
+#     from a local better-sqlite3 file, not from the D1 binding below.
+#     Wiring the app's own API routes to call into D1/BidCoordinator
+#     instead requires OpenNext's Cloudflare adapter
+#     (https://opennext.js.org/cloudflare) so Next.js server code can reach
+#     `env.DB` and `env.BID_COORDINATOR` via `getCloudflareContext()`.
+#   - moving scheduled jobs (YouTube stats refresh, sitemap generation)
+#     into the Cron Trigger below.
+#
+# Durable Objects require at least the Workers Paid plan ($5/mo) —
+# something to know before committing to this architecture in production.
+
+name = "ytrankwar"
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ytrankwar-db"
+database_id = "REPLACE_WITH_REAL_D1_DATABASE_ID" # from: wrangler d1 create ytrankwar-db
+
+[[durable_objects.bindings]]
+name = "BID_COORDINATOR"
+class_name = "BidCoordinator"
+
+# Required whenever a Durable Object class is introduced or changed —
+# tells Cloudflare how to provision storage for it. "new_sqlite_classes"
+# is correct for a freshly-introduced class (as opposed to
+# "new_classes"/"renamed_classes"/"deleted_classes" for later changes).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BidCoordinator"]
+
+# Uncomment if/when channel avatars or OG card images are stored in R2
+# instead of generated on the fly.
+# [[r2_buckets]]
+# binding = "ASSETS"
+# bucket_name = "ytrankwar-assets"
+
+# Scheduled refresh of cached YouTube statistics (see lib/youtube.ts) —
+# never call the YouTube Data API on a live page request.
+[triggers]
+crons = ["0 * * * *"]

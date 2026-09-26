@@ -1,0 +1,3 @@
+# Copy to .dev.vars (git-ignored). Read by `next dev` and `npm run cf:preview`.
+YOUTUBE_API_KEY=
+SITE_URL=http://localhost:3000
