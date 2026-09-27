@@ -7,6 +7,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "cf:build": "opennextjs-cloudflare build",
+    "cf:preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx db/migrate.ts",
     "db:seed": "tsx db/seed.ts",
@@ -27,12 +30,13 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260914.1",
+    "@opennextjs/cloudflare": "^1.10.0",
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "20.14.11",
     "@types/react": "18.3.3",
     "@types/react-dom": "18.3.0",
     "tsx": "4.16.2",
     "typescript": "5.5.4",
-    "wrangler": "^4.131.2"
+    "wrangler": "^4.141.0"
   }
 }
