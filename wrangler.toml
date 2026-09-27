@@ -25,6 +25,10 @@ name = "ytrankwar"
 compatibility_date = "2026-08-01"
 compatibility_flags = ["nodejs_compat"]
 
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "ytrankwar-db"
@@ -33,6 +37,10 @@ database_id = "7c39b21e-7483-4fc7-bb52-974b3115a3cc" # from: wrangler d1 create 
 [[durable_objects.bindings]]
 name = "BID_COORDINATOR"
 class_name = "BidCoordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BidCoordinator"]
 
 # Required whenever a Durable Object class is introduced or changed —
 # tells Cloudflare how to provision storage for it. "new_sqlite_classes"
