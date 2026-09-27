@@ -3,11 +3,11 @@ import { db } from '@/db';
 import { submitChannel, mockVerifyChannel, ChannelError } from '@/lib/channel-service';
 
 // No login in this app. "My channels" is tracked entirely client-side
-// (localStorage holds {channelId, manageToken, slug, name} per channel this
-// browser created — see lib/local-channels.ts). This GET endpoint only does
-// public, harmless bulk lookups by id so the client can refresh live data
-// (current rank, bid total, verification status) for whichever channels it
-// already knows about — it never reveals manage_token or any other secret.
+// (localStorage holds {channelId, slug, name} per channel this browser
+// added — see lib/local-channels.ts, purely a convenience shortlist, not a
+// credential). This GET endpoint just does public, harmless bulk lookups
+// by id so the client can refresh live data (current rank, bid total,
+// verification status) for whichever channels it already knows about.
 export async function GET(req: NextRequest) {
   const idsParam = req.nextUrl.searchParams.get('ids');
   if (!idsParam) return NextResponse.json({ channels: [] });
@@ -50,9 +50,6 @@ export async function POST(req: NextRequest) {
       mockVerifyChannel(result.channelId);
     }
 
-    // manageToken is returned exactly once, here — the client must persist
-    // it (localStorage) to retain control of this channel. It cannot be
-    // recovered later since the server never displays it again.
     return NextResponse.json({ ...result, verified: premium }, { status: 201 });
   } catch (e) {
     if (e instanceof ChannelError) {

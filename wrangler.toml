@@ -28,7 +28,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "ytrankwar-db"
-database_id = "REPLACE_WITH_REAL_D1_DATABASE_ID" # from: wrangler d1 create ytrankwar-db
+database_id = "7c39b21e-7483-4fc7-bb52-974b3115a3cc" # from: wrangler d1 create ytrankwar-db
 
 [[durable_objects.bindings]]
 name = "BID_COORDINATOR"

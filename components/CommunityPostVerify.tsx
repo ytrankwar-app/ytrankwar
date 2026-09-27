@@ -4,13 +4,11 @@ import { useState } from 'react';
 
 export function CommunityPostVerify({
   channelId,
-  manageToken,
   postText,
   communityUrl,
   onVerified,
 }: {
   channelId: string;
-  manageToken: string;
   postText: string;
   communityUrl: string;
   onVerified: () => void;
@@ -38,7 +36,7 @@ export function CommunityPostVerify({
     const res = await fetch(`/api/channels/${channelId}/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ postUrl, manageToken }),
+      body: JSON.stringify({ postUrl }),
     });
     const data = await res.json();
     setBusy(false);

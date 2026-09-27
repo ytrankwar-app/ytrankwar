@@ -5,11 +5,10 @@ import { db } from '@/db';
 // increments that channel's referred_visits counter (a separate signal from
 // the paid leaderboard, never affecting cumulative-bid rank — see
 // lib/leaderboard-service.ts, which is untouched by this).
-export async function GET(req: NextRequest, { params }: { params: Promise<{ code: string }> }) {
-  const { code } = await params;
+export async function GET(req: NextRequest, { params }: { params: { code: string } }) {
   const channel = db
     .prepare('SELECT id, slug FROM channels WHERE referral_code = ?')
-    .get(code) as { id: string; slug: string } | undefined;
+    .get(params.code) as { id: string; slug: string } | undefined;
 
   if (!channel) {
     return NextResponse.redirect(new URL('/', req.url));

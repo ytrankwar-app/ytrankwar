@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/db';
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+export async function GET(_req: Request, { params }: { params: { id: string } }) {
   const channel = db
     .prepare(
       `SELECT c.id, c.name, c.slug, c.handle, c.avatar_url as avatarUrl, c.description,
@@ -16,7 +15,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
        LEFT JOIN listings l ON l.channel_id = c.id
        WHERE c.id = ?`
     )
-    .get(id);
+    .get(params.id);
 
   if (!channel) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
@@ -26,14 +25,14 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
               rank_after as rankAfter, created_at as createdAt
        FROM bids WHERE channel_id = ? ORDER BY created_at DESC LIMIT 25`
     )
-    .all(id);
+    .all(params.id);
 
   const rankHistory = db
     .prepare(
       `SELECT rank, total_bid_cents as totalBidCents, recorded_at as recordedAt
        FROM rank_history WHERE channel_id = ? ORDER BY recorded_at ASC LIMIT 200`
     )
-    .all(id);
+    .all(params.id);
 
   return NextResponse.json({ channel, bidHistory, rankHistory });
 }

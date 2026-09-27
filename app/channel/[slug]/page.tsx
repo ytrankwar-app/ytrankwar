@@ -7,7 +7,6 @@ import { centsToDisplay } from '@/lib/money';
 import { db } from '@/db';
 import { ChannelActions } from '@/components/ChannelActions';
 import { VisitYouTubeButton } from '@/components/VisitYouTubeButton';
-import { ManageTokenCapture } from '@/components/ManageTokenCapture';
 import { ReferralSection } from '@/components/ReferralSection';
 
 interface ChannelRow {
@@ -49,9 +48,8 @@ function loadChannel(slug: string) {
   return { channel, rank, bidHistory };
 }
 
-export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
-  const { slug } = await params;
-  const data = loadChannel(slug);
+export function generateMetadata({ params }: { params: { slug: string } }): Metadata {
+  const data = loadChannel(params.slug);
   if (!data) return { title: 'Channel not found — ytrankwar' };
   const { channel, rank } = data;
   const title = `${channel.name} YouTube Channel Ranking — Current Rank & Profile`;
@@ -64,19 +62,17 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   };
 }
 
-export default async function ChannelProfilePage({
+export default function ChannelProfilePage({
   params,
   searchParams,
 }: {
-  params: Promise<{ slug: string }>;
-  searchParams: Promise<{ claim?: string; manage?: string }>;
+  params: { slug: string };
+  searchParams: { claim?: string };
 }) {
-  const { slug } = await params;
-  const resolvedSearchParams = await searchParams;
-  const data = loadChannel(slug);
+  const data = loadChannel(params.slug);
   if (!data) notFound();
   const { channel, rank, bidHistory } = data;
-  const autoOpenBid = resolvedSearchParams.claim === '1';
+  const autoOpenBid = searchParams.claim === '1';
 
   const siteUrl = process.env.SITE_URL || 'https://ytrankwar.example';
   const verificationInfo = getVerificationInfo(
@@ -114,7 +110,6 @@ export default async function ChannelProfilePage({
     <div className="container" style={{ paddingTop: 32, paddingBottom: 60 }}>
       {/* eslint-disable-next-line react/no-danger */}
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }} />
-      <ManageTokenCapture channelId={channel.id} slug={channel.slug} name={channel.name} />
 
       <div style={{ display: 'flex', gap: 20, alignItems: 'center', flexWrap: 'wrap' }}>
         <img className="avatar" style={{ width: 72, height: 72 }} src={channel.avatarUrl ?? ''} alt="" />
@@ -140,8 +135,8 @@ export default async function ChannelProfilePage({
             <ChannelActions
               channelId={channel.id}
               channelName={channel.name}
+              channelSlug={channel.slug}
               verificationStatus={channel.verification_status}
-              currentRank={rank ? rank.rank : null}
               autoOpenBid={autoOpenBid}
               verificationPostText={verificationInfo.postText}
               verificationCommunityUrl={verificationInfo.communityUrl}

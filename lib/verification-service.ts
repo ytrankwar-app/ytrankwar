@@ -90,10 +90,11 @@ export function looksLikeOwnCommunityPost(url: string, handle: string | null, yo
 }
 
 /**
- * Records the submitted proof and marks the channel verified. The caller
- * (API route) is responsible for having already checked the requester's
- * manage_token before calling this — this function only knows about the
- * channel, not who's asking.
+ * Records the submitted proof and marks the channel verified. There is no
+ * login or ownership token anywhere in this app — the structural check in
+ * looksLikeOwnCommunityPost above (and, in a real deployment, actually
+ * reading the post back) is the only gate, since only the real channel
+ * owner can post to that channel's own Community tab.
  */
 export function submitCommunityPostProof(params: {
   channelId: string;

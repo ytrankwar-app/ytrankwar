@@ -1,17 +1,18 @@
 'use client';
 
-// No login in this app. "My channels" is entirely client-side: whichever
-// channels this browser has created, along with the SECRET manage_token
-// that authorizes managing/bidding on each one. This is the same trust
-// model as a password-reset link — whoever holds the token controls the
-// channel — so this data never leaves localStorage except as the
-// `manageToken` field sent with a specific management request.
+// There is no login and no ownership credential anywhere in this app —
+// anyone can bid on or verify any channel by calling the API directly.
+// "My channels" is purely a client-side convenience: whichever channels
+// this browser has added, remembered so the UI can offer a shortlist
+// (e.g. "which of your channels do you want to bid up?") instead of
+// making you hunt down a channel by slug every time. It grants no
+// access — clearing it or switching devices loses only the shortcut,
+// never control of anything.
 
 const STORAGE_KEY = 'ytrankwar_my_channels';
 
 export interface LocalChannel {
   channelId: string;
-  manageToken: string;
   slug: string;
   name: string;
 }
@@ -32,16 +33,11 @@ export function saveLocalChannel(channel: LocalChannel): void {
     const existing = getLocalChannels().filter((c) => c.channelId !== channel.channelId);
     localStorage.setItem(STORAGE_KEY, JSON.stringify([...existing, channel]));
   } catch {
-    // localStorage unavailable (e.g. privacy mode) — the channel still
-    // exists server-side, but this browser won't remember it. Nothing to
-    // recover from here; the user would need their saved manage link.
+    // localStorage unavailable (e.g. privacy mode) — harmless, this is
+    // only a convenience shortlist.
   }
 }
 
 export function getLocalChannel(channelId: string): LocalChannel | null {
   return getLocalChannels().find((c) => c.channelId === channelId) ?? null;
-}
-
-export function getManageToken(channelId: string): string | null {
-  return getLocalChannel(channelId)?.manageToken ?? null;
 }

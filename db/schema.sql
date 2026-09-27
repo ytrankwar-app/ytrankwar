@@ -3,16 +3,15 @@
 
 PRAGMA foreign_keys = ON;
 
--- No login in this app. One synthetic row is auto-created per channel at
--- submission time purely so bids/payments/reports have a stable user_id to
--- reference for audit continuity — see lib/channel-service.ts. Real
--- authorization for managing a channel is the manage_token on `channels`,
--- not identity in this table.
+-- No login and no accounts in this app. One synthetic row is auto-created
+-- per channel at submission time purely so bids/payments/reports have a
+-- stable user_id to reference for audit continuity — see
+-- lib/channel-service.ts. There is no authorization check anywhere; anyone
+-- can bid on or verify any channel.
 CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,
   name          TEXT NOT NULL,
   email         TEXT NOT NULL UNIQUE,
-  is_admin      INTEGER NOT NULL DEFAULT 0,
   suspended     INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
@@ -44,12 +43,6 @@ CREATE TABLE IF NOT EXISTS channels (
   -- no login in this app; a synthetic user row is auto-created per channel
   -- at submission time. See lib/channel-service.ts.
   owner_user_id       TEXT REFERENCES users(id),
-  -- SECRET. The only credential that authorizes managing/bidding on this
-  -- channel — a "magic link" token, never displayed after creation except
-  -- via the one-time manage link, and normally supplied by the client from
-  -- localStorage. Whoever holds this token controls the channel, the same
-  -- trust model as a password-reset link. See lib/manage-auth.ts.
-  manage_token        TEXT UNIQUE,
   -- PUBLIC. Generated at submission time and meant to be shared: posting it
   -- to the channel's YouTube Community tab both proves ownership (only the
   -- real owner can post there) and drives referred traffic — visits via
@@ -69,7 +62,6 @@ CREATE INDEX IF NOT EXISTS idx_channels_youtube_id ON channels(youtube_channel_i
 CREATE INDEX IF NOT EXISTS idx_channels_category ON channels(category_slug);
 CREATE INDEX IF NOT EXISTS idx_channels_country ON channels(country_code);
 CREATE INDEX IF NOT EXISTS idx_channels_verified ON channels(verification_status);
-CREATE INDEX IF NOT EXISTS idx_channels_manage_token ON channels(manage_token);
 CREATE INDEX IF NOT EXISTS idx_channels_referral_code ON channels(referral_code);
 CREATE INDEX IF NOT EXISTS idx_channels_referred_visits ON channels(referred_visits DESC);
 
@@ -192,16 +184,6 @@ CREATE TABLE IF NOT EXISTS reports (
   details       TEXT,
   status        TEXT NOT NULL DEFAULT 'pending'
                   CHECK (status IN ('pending','under_review','approved','rejected','removed')),
-  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-);
-
-CREATE TABLE IF NOT EXISTS admin_actions (
-  id            TEXT PRIMARY KEY,
-  admin_user_id TEXT NOT NULL REFERENCES users(id),
-  action        TEXT NOT NULL,
-  target_type   TEXT NOT NULL,
-  target_id     TEXT NOT NULL,
-  notes         TEXT,
   created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 

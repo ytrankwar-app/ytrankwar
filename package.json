@@ -19,10 +19,9 @@
     "workers:verify-concurrency": "sh workers/verify-concurrency-proof.sh"
   },
   "dependencies": {
-    "@opennextjs/cloudflare": "^1.20.6",
     "better-sqlite3": "13.0.3",
-    "nanoid": "^5.1.16",
-    "next": "^16.3.6",
+    "nanoid": "5.0.7",
+    "next": "14.2.35",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
@@ -32,7 +31,7 @@
     "@types/node": "20.14.11",
     "@types/react": "18.3.3",
     "@types/react-dom": "18.3.0",
-    "tsx": "^4.23.15",
+    "tsx": "4.16.2",
     "typescript": "5.5.4",
     "wrangler": "^4.131.2"
   }

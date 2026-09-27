@@ -8,7 +8,7 @@
 // re-fetches real data for every channel already in the database and
 // updates it in place — names, handles, avatars, descriptions, and
 // subscriber/view/video counts. Bids, verification status, and the
-// manage_token/referral_code are untouched.
+// referral_code are untouched.
 
 import type Database from 'better-sqlite3';
 import { fileURLToPath } from 'node:url';

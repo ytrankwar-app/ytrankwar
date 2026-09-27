@@ -6,7 +6,8 @@ import path from 'node:path';
 process.env.SQLITE_PATH = path.join(process.cwd(), 'data', `test-refresh-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
 
 const { db } = await import('../db/index');
-const { newId, newSecretToken } = await import('../lib/ids');
+const { newId } = await import('../lib/ids');
+const { newReferralCode } = await import('../lib/verification-service');
 const { refreshAllChannelStats } = await import('../scripts/refresh-channel-stats');
 
 const originalFetch = globalThis.fetch;
@@ -23,9 +24,9 @@ function makeChannelWithOldMockData(name: string, youtubeChannelId: string) {
   const ownerUserId = newId('usr');
   db.prepare('INSERT INTO users (id, name, email) VALUES (?, ?, ?)').run(ownerUserId, name, `${id}@owner.test`);
   db.prepare(
-    `INSERT INTO channels (id, youtube_channel_id, slug, name, handle, avatar_url, description, owner_user_id, manage_token, verification_status)
+    `INSERT INTO channels (id, youtube_channel_id, slug, name, handle, avatar_url, description, owner_user_id, referral_code, verification_status)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified')`
-  ).run(id, youtubeChannelId, id, name, '@oldhandle', 'https://dicebear.example/old.svg', 'old mock description', ownerUserId, newSecretToken());
+  ).run(id, youtubeChannelId, id, name, '@oldhandle', 'https://dicebear.example/old.svg', 'old mock description', ownerUserId, newReferralCode());
   db.prepare(
     `INSERT INTO channel_stats (channel_id, subscribers, total_views, video_count) VALUES (?, ?, ?, ?)`
   ).run(id, 12345, 99999, 42);
@@ -80,13 +81,13 @@ test('refreshAllChannelStats replaces old (mock) data with the real API response
   assert.ok(logs.some((l) => l.includes('The Real Channel Name')));
 });
 
-test('refreshAllChannelStats leaves bidding/verification/manage_token completely untouched', async () => {
+test('refreshAllChannelStats leaves bidding/verification/referral_code completely untouched', async () => {
   process.env.YOUTUBE_API_KEY = 'test-key';
   const channelId = makeChannelWithOldMockData('Untouched Fields Test', 'UCuntouched1');
 
   const before = db
-    .prepare('SELECT manage_token as manageToken, verification_status as verificationStatus FROM channels WHERE id = ?')
-    .get(channelId) as { manageToken: string; verificationStatus: string };
+    .prepare('SELECT referral_code as referralCode, verification_status as verificationStatus FROM channels WHERE id = ?')
+    .get(channelId) as { referralCode: string; verificationStatus: string };
 
   globalThis.fetch = (async () => ({
     ok: true,
@@ -105,10 +106,10 @@ test('refreshAllChannelStats leaves bidding/verification/manage_token completely
   await refreshAllChannelStats(db, () => {});
 
   const after = db
-    .prepare('SELECT manage_token as manageToken, verification_status as verificationStatus FROM channels WHERE id = ?')
-    .get(channelId) as { manageToken: string; verificationStatus: string };
+    .prepare('SELECT referral_code as referralCode, verification_status as verificationStatus FROM channels WHERE id = ?')
+    .get(channelId) as { referralCode: string; verificationStatus: string };
 
-  assert.equal(after.manageToken, before.manageToken);
+  assert.equal(after.referralCode, before.referralCode);
   assert.equal(after.verificationStatus, before.verificationStatus);
 });
 

@@ -26,7 +26,7 @@ integration would use.
 | Public homepage only — no admin panel or dashboard | **Intentional.** Verification and bid management happen on the channel's own profile page instead. |
 | YouTube Data API (`lib/youtube.ts`) | **Real, opt-in.** Set `YOUTUBE_API_KEY` and channel name, logo, subscriber/view/video counts, and creation date come from the real `channels.list`/`search.list` endpoints. Without a key, falls back to deterministic mock data automatically so the app still works out of the box. Parsing/fallback/error-handling logic is covered by tests with a mocked `fetch` (`test/youtube-real-api.test.ts`) — a live call was not possible to test from this environment (no network egress to googleapis.com here), so test it with your own key before relying on it. |
 | Payments (`app/api/payments/*`) | **Mocked.** A "Simulate payment" button stands in for Stripe Checkout; the webhook handler is written exactly like a real Stripe webhook (idempotent, re-validates server-side) so swapping in real Stripe is additive, not a rewrite. |
-| No login (`lib/manage-auth.ts`) | **Real, by design.** There is no sign-in anywhere in this app. Pasting a channel link generates a secret `manage_token` ("magic link" model, like a password-reset link) that's the only credential authorizing bidding/verification on that channel. See "No login" below. |
+| No login, no accounts, no admin panel | **Real, by design.** There is no sign-in and no credential of any kind anywhere in this app. Anyone can add a channel, submit verification proof for any channel, and bid on any verified channel — the API enforces nothing about who's asking. See "No login" below. |
 | Ownership verification (`lib/verification-service.ts`) | **Real flow, mocked check.** Owner shares a generated public link on their channel's YouTube Community tab and submits the post URL back — this is genuinely Method B from the spec, not a placeholder button. What's mocked: without YouTube API access, the server checks the URL is *structurally* a plausible community-post link rather than fetching and confirming the link actually appears in the post. See the section below. |
 | Referral leaderboard (`getReferralLeaderboard` in `lib/leaderboard-service.ts`) | **Real, and deliberately separate.** Visits via a channel's shared `/r/{code}` link feed a second, clearly-labeled scoreboard. This never touches or influences `total_bid_cents` or paid rank — the spec is explicit that paid rank reflects verified bid only. |
 | Cloudflare D1 schema & BidCoordinator Durable Object | **Real, independently verified.** The D1 migration and the money-critical bid-confirmation Durable Object both actually run and were tested against a real local Cloudflare Workers + D1 + Durable Objects runtime — see "Cloudflare D1 + Durable Objects" below. |
@@ -94,56 +94,50 @@ don't also trigger the row's navigation. A **Top 10 / Top 20 / Top 50**
 control sits alongside the category tabs, simply setting the existing
 `limit` query param.
 
-## Referral link: owner-only, by explicit product decision
+## Referral link: public, visible to everyone
 
-This has flip-flopped once and it's worth documenting why, rather than
-leaving only the current state: an earlier revision made the "share this
-channel" panel visible to every visitor (the `referral_code`/link itself
-was never actually secret — only `manage_token` is — so showing it publicly
-wasn't a *security* problem). That was then explicitly reverted: channel
-privacy takes priority here, so `components/ReferralSection.tsx` now hides
-the entire panel — both the share link and the "show my management link"
-reveal beneath it — unless the visiting browser holds that specific
-channel's real `manage_token`. Nobody but the channel's own creator can see
-or copy either link from its profile page.
+There is no login or ownership credential in this app (see "No login"
+below), so there's no "owner-only" view to gate this behind. An earlier
+revision hid the "share this channel" panel unless the visiting browser held
+that channel's `manage_token`; now that the token model has been removed
+entirely, `components/ReferralSection.tsx` always renders the panel — the
+`referral_code`/link was always meant to be shared publicly anyway.
 
-## No login: the manage_token model
+## No login: fully open, by design
 
-There is no sign-in, no password, no session anywhere in this app — pasting
-a YouTube channel link is the entire "account creation" step:
+There is no sign-in, no password, no session, and no per-channel credential
+anywhere in this app. Submitting a channel (`POST /api/channels`) just
+generates a public `referralCode` (safe to share, builds the `/r/{code}`
+link described below) — nothing secret is returned or stored.
 
-1. Submitting a channel (`POST /api/channels`) generates two distinct
-   tokens, returned exactly once:
-   - `manageToken` — **secret**. Whoever holds it can bid on and verify that
-     channel. The browser saves it to `localStorage`
-     (`lib/local-channels.ts`) automatically; it is never shown again by the
-     server after this response, the same trust model as a password-reset
-     link.
-   - `referralCode` — **public**, safe to share. Builds the `/r/{code}` link
-     described below.
-2. Every management request (bid, verify) includes the `manageToken` in its
-   body. The server checks it against `channels.manage_token`
-   (`lib/manage-auth.ts`) — that check *is* the entire authorization model.
-   No user table lookup, no cookie, no session.
-3. To use a saved channel from a different browser or after clearing
-   storage, visiting `/channel/{slug}?manage={token}` (shown as a
-   reveal-to-view "management link" on the channel's own page) restores
-   access — `components/ManageTokenCapture.tsx` saves it back into that
-   browser's `localStorage` and strips it from the visible URL.
+- **Anyone can bid on any verified channel.** `POST /api/payments/create`
+  and `createPayment()` (`lib/bidding-service.ts`) take only a `channelId`;
+  the only gate is the channel's own state (verified, not
+  suspended/removed) — never who's asking.
+- **Anyone can submit ownership-verification proof for any channel.**
+  `POST /api/channels/{id}/verify` has no auth check either. The proof
+  itself is the real gate: only the actual channel owner can post to that
+  channel's own YouTube Community tab, so a valid post URL is
+  self-authenticating (see "Ownership verification" below).
+- **"My channels" (`lib/local-channels.ts`) is a client-side convenience
+  only**, not a credential. It's a `localStorage` list of channels this
+  browser has visited or added, used purely so pickers (e.g. "which of your
+  channels do you want to bid up?" in `ClaimRankModal.tsx`) can offer a
+  shortlist instead of making you look up a channel by slug every time.
+  Clearing it, or opening the site on a different device, loses only that
+  shortcut — never any access, since there was never any access to lose.
 
-This is intentionally channel-scoped, not person-scoped: there's no concept
-of "a user" who owns several channels beyond "a browser holding several
-tokens." A `users` table still exists in the schema purely so
-`bids`/`payments` rows have a stable id to reference for audit continuity —
-a synthetic row is auto-created per channel at submission time
-(`lib/channel-service.ts`) and is never used for authorization.
+A `users` table still exists in the schema purely so `bids`/`payments` rows
+have a stable id to reference for audit continuity — a synthetic row is
+auto-created per channel at submission time (`lib/channel-service.ts`) and
+is never used for authorization.
 
-**Trade-off, stated plainly:** anyone who obtains a `manage_token` controls
-that channel, and losing it (clearing browser storage, without having saved
-the manage link elsewhere) means losing access with no recovery path — there
-is no "forgot password" flow, because there's no password. This is the same
-trade-off as any bookmarklet/magic-link tool; it was chosen deliberately over
-accounts, not overlooked.
+**Trade-off, stated plainly:** with no ownership check, anyone can pay to
+raise any channel's total (not just its original submitter's) — functionally
+closer to "sponsor any channel you like" than "defend your own channel from
+rivals." That's an intentional consequence of removing login entirely, not
+an oversight; see the "Coming from here" section at the bottom for what
+adding real per-channel ownership back would require.
 
 ## Referral traffic: the /r/{code} link and its leaderboard
 
@@ -166,9 +160,8 @@ Community instead:
 ## Ownership verification: post to YouTube Community
 
 This is now the same link described in "No login" and "Referral traffic"
-above — one link serves three purposes (management access via the token
-that generated it, ownership proof, and referral tracking), which is worth
-restating concretely as a single flow:
+above — one link serves two purposes (ownership proof and referral
+tracking), which is worth restating concretely as a single flow:
 
 1. A unique public code (`YTW-XXXXXXXX`) is generated per channel at
    submission time (`channels.referral_code`) — this is the code embedded
@@ -179,8 +172,10 @@ restating concretely as a single flow:
    intent" URL like X's `intent/tweet?text=...`, so this is copy-paste
    rather than one click.
 3. The owner posts the copied text there, then pastes the post's URL back
-   into the verification form (this step needs the `manageToken` from
-   "No login" above — only the browser holding it can submit proof).
+   into the verification form — anyone can open this form for any channel
+   (there is no login), but only the real owner can produce a URL that
+   actually points at a post on that channel's own Community tab, which is
+   what the next step checks.
 4. The server (`lib/verification-service.ts`) validates the URL is
    plausibly a YouTube community-post link for that channel and records it
    in `channel_ownership_tokens` as an audit trail, then marks the channel
@@ -346,12 +341,11 @@ unfair leaderboard, so it got the most attention:
 - **Nothing about price or rank is trusted from the client.** The quote shown
   before checkout is advisory; the real total is re-read from the database
   inside the transaction at confirmation time.
-- **Only a channel's `manage_token` holder can bid on it.** Bidding always
-  raises YOUR channel's position — the server checks the submitted
-  `manageToken` against `channels.manage_token` on payment creation
-  (`lib/manage-auth.ts`), independent of what the UI happens to show. There
-  is no session to check at confirmation time; see "No login" above for why
-  that's a deliberate design, not a gap.
+- **There is no ownership check on bidding at all.** Any verified channel
+  can be bid on by anyone — the server never checks who's asking, only that
+  the target channel itself is verified and not suspended/removed
+  (`assertChannelEligible` in `lib/bidding-service.ts`). See "No login"
+  above for what that trades away.
 
 Run `npm test` to see this exercised directly, including a simulated race
 where two bidders check out against the same stale "current #1" price at
@@ -514,7 +508,7 @@ file, not against D1. Wiring them together is the remaining work:
    `getCloudflareContext()`.
 2. **The rest of the data layer**: every other function in `lib/*.ts`
    (`leaderboard-service.ts`, `channel-service.ts`, `verification-service.ts`,
-   `manage-auth.ts`, `settings.ts`, `presence-service.ts`) is still
+   `settings.ts`, `presence-service.ts`) is still
    synchronous `better-sqlite3` code and needs converting to async D1
    queries. None of these have D1's transaction limitation as a concern —
    they're ordinary reads and independent writes — so this is a more
@@ -537,14 +531,17 @@ file, not against D1. Wiring them together is the remaining work:
    Checkout Session creation call, and `app/api/payments/webhook` with
    `stripe.webhooks.constructEvent` signature verification before calling
    into the Durable Object.
-6. **Optional accounts on top of the token model**: this app deliberately
-   has no login (see "No login" above) — `manage_token` possession is the
-   entire authorization model, and that can stay true in production too.
-   If real user accounts are ever wanted (e.g. so someone can see all their
-   channels without local storage), add them as an *additional* layer that
-   maps a real identity to the `manage_token`s it has created, rather than
-   replacing the token check in `lib/manage-auth.ts`. Google OAuth login
-   can double as YouTube ownership Method A if added.
+6. **Optional accounts, or ownership, on top of the open model**: this app
+   deliberately has no login and no per-channel ownership check at all (see
+   "No login" above) — anyone can bid on or verify any channel, and that can
+   stay true in production too. If real ownership/accounts are ever wanted
+   (so a channel can only be raised by whoever added it, or so someone can
+   see all their channels without local storage), the natural place to add
+   it is a credential or session check inside `assertChannelEligible`
+   (`lib/bidding-service.ts`) and the verify route
+   (`app/api/channels/[id]/verify/route.ts`) — both currently have no such
+   check by design. Google OAuth login can double as YouTube ownership
+   Method A if added.
 7. **Everything not built yet** per the original spec — country/category
    SEO landing pages beyond the tabs already on the homepage, battle pages,
    moderation queue UI, and email notifications — can be layered on top of

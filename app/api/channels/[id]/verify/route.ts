@@ -1,30 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireManageToken, ManageAuthError } from '@/lib/manage-auth';
 import { submitCommunityPostProof, VerificationError } from '@/lib/verification-service';
 import { db } from '@/db';
 
 // Real ownership verification (Method B from the spec): the owner posts
 // their channel's referral link to its YouTube Community tab, then submits
-// the URL of that post here. Authorized by manage_token (no login) — see
-// lib/manage-auth.ts. See lib/verification-service.ts for exactly what is
-// and isn't actually checked in this demo (no live YouTube API access).
-export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+// the URL of that post here. There is no login and no token check on this
+// endpoint — the proof itself is the gate, since only the real channel
+// owner can post to that channel's own Community tab. See
+// lib/verification-service.ts for exactly what is and isn't actually
+// checked in this demo (no live YouTube API access).
+export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
   const body = await req.json().catch(() => ({}));
-  const manageToken = typeof body.manageToken === 'string' ? body.manageToken : null;
-
-  try {
-    requireManageToken(id, manageToken);
-  } catch (e) {
-    if (e instanceof ManageAuthError) return NextResponse.json({ error: e.message }, { status: 403 });
-    throw e;
-  }
 
   const channel = db
     .prepare(
       'SELECT handle, youtube_channel_id as youtubeChannelId, referral_code as referralCode FROM channels WHERE id = ?'
     )
-    .get(id) as { handle: string | null; youtubeChannelId: string; referralCode: string | null } | undefined;
+    .get(params.id) as { handle: string | null; youtubeChannelId: string; referralCode: string | null } | undefined;
 
   if (!channel) return NextResponse.json({ error: "We couldn't find that channel." }, { status: 404 });
 
@@ -35,7 +27,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   try {
     submitCommunityPostProof({
-      channelId: id,
+      channelId: params.id,
       postUrl,
       referralCode: channel.referralCode ?? '',
       handle: channel.handle,

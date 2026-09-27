@@ -25,12 +25,10 @@ export function AddChannelForm() {
       return;
     }
 
-    // manageToken is returned exactly once, right here — save it now or
-    // it's gone. This is what lets this browser manage/bid on the channel
-    // later without any account. The same token is embedded in the manage
-    // link shown after redirect, in case they want to open it on another
-    // device too.
-    saveLocalChannel({ channelId: data.channelId, manageToken: data.manageToken, slug: data.slug, name: data.name });
+    // Remembered client-side purely as a convenience shortlist (see
+    // lib/local-channels.ts) — there is no login or ownership credential
+    // anywhere in this app.
+    saveLocalChannel({ channelId: data.channelId, slug: data.slug, name: data.name });
 
     // The premium path lands on the channel page with ?claim=1, which
     // auto-opens the bid modal (the channel was already auto-verified

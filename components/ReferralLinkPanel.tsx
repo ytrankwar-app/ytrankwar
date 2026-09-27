@@ -29,8 +29,7 @@ export function ReferralLinkPanel({
       <p className="muted small">
         Share this on your channel's Community tab. Every visitor who clicks it counts toward your spot on the{' '}
         <a href="#referral-leaderboard" style={{ textDecoration: 'underline' }}>referral leaderboard</a> — a separate
-        board from paid rank, which is decided by bid only. This is only visible to you; nobody else can see or
-        copy this link from your channel's page.
+        board from paid rank, which is decided by bid only.
       </p>
       <div className="verify-post-text">{postText}</div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>

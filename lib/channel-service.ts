@@ -1,5 +1,5 @@
 import { db } from '@/db';
-import { newId, newSecretToken, slugify } from './ids';
+import { newId, slugify } from './ids';
 import { lookupChannel, YouTubeLookupError } from './youtube';
 import { newReferralCode } from './verification-service';
 
@@ -12,11 +12,10 @@ export class ChannelError extends Error {
 }
 
 /**
- * No login in this app. Every submission auto-creates a synthetic user row
- * purely so bids/payments/reports have a stable user_id to reference for
- * audit continuity — it is never used for authorization. Real control of
- * the channel is the manage_token returned from submitChannel(), not this
- * identity.
+ * No login, no accounts, and no per-channel ownership credential anywhere
+ * in this app. Every submission auto-creates a synthetic user row purely
+ * so bids/payments/reports have a stable user_id to reference for audit
+ * continuity — it is never used for authorization, since there is none.
  */
 function createSyntheticOwner(channelId: string): string {
   const userId = newId('usr');
@@ -32,10 +31,6 @@ export interface SubmitChannelResult {
   channelId: string;
   slug: string;
   name: string;
-  /** SECRET — returned only once, here. The caller must persist this
-   *  (localStorage) to retain control of the channel; it cannot be
-   *  recovered later since nothing else displays it. */
-  manageToken: string;
   /** PUBLIC — safe to share/post. */
   referralCode: string;
 }
@@ -68,15 +63,14 @@ export async function submitChannel(params: {
     slug = `${baseSlug}-${++n}`;
   }
 
-  const manageToken = newSecretToken();
   const referralCode = newReferralCode();
 
   const insert = db.transaction(() => {
     const ownerUserId = createSyntheticOwner(id);
 
     db.prepare(
-      `INSERT INTO channels (id, youtube_channel_id, slug, name, handle, avatar_url, description, category_slug, country_code, owner_user_id, manage_token, referral_code, verification_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+      `INSERT INTO channels (id, youtube_channel_id, slug, name, handle, avatar_url, description, category_slug, country_code, owner_user_id, referral_code, verification_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
     ).run(
       id,
       info.youtubeChannelId,
@@ -88,7 +82,6 @@ export async function submitChannel(params: {
       params.category ?? null,
       params.country ?? null,
       ownerUserId,
-      manageToken,
       referralCode
     );
 
@@ -103,7 +96,7 @@ export async function submitChannel(params: {
   });
   insert();
 
-  return { channelId: id, slug, name: info.name, manageToken, referralCode };
+  return { channelId: id, slug, name: info.name, referralCode };
 }
 
 /**

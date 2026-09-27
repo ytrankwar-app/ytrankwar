@@ -6,7 +6,7 @@ import path from 'node:path';
 process.env.SQLITE_PATH = path.join(process.cwd(), 'data', `test-lb-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
 
 const { db } = await import('../db/index');
-const { newId, newSecretToken } = await import('../lib/ids');
+const { newId } = await import('../lib/ids');
 const { getLeaderboard, getChannelRank } = await import('../lib/leaderboard-service');
 const { minBidCents } = await import('../lib/settings');
 
@@ -21,9 +21,9 @@ function makeChannel(name: string) {
   const ownerUserId = newId('usr');
   db.prepare('INSERT INTO users (id, name, email) VALUES (?, ?, ?)').run(ownerUserId, name, `${id}@owner.test`);
   db.prepare(
-    `INSERT INTO channels (id, youtube_channel_id, slug, name, owner_user_id, manage_token, category_slug, verification_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'verified')`
-  ).run(id, `UC_${id}`, id, name, ownerUserId, newSecretToken(), CATEGORY);
+    `INSERT INTO channels (id, youtube_channel_id, slug, name, owner_user_id, category_slug, verification_status)
+     VALUES (?, ?, ?, ?, ?, ?, 'verified')`
+  ).run(id, `UC_${id}`, id, name, ownerUserId, CATEGORY);
   db.prepare('INSERT INTO listings (channel_id, total_bid_cents) VALUES (?, 0)').run(id);
   return { id };
 }

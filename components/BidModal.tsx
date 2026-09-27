@@ -13,13 +13,11 @@ interface Quote {
 export function BidModal({
   channelId,
   channelName,
-  manageToken,
   onClose,
   onSuccess,
 }: {
   channelId: string;
   channelName: string;
-  manageToken: string;
   onClose: () => void;
   onSuccess: () => void;
 }) {
@@ -47,7 +45,7 @@ export function BidModal({
     const res = await fetch('/api/payments/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channelId, desiredRank, manageToken }),
+      body: JSON.stringify({ channelId, desiredRank }),
     });
     const data = await res.json();
     setBusy(false);

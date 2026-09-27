@@ -22,11 +22,11 @@ interface Quote {
  *  - the per-row "Outbid" button (targetRank = that row's current rank, so
  *    the selected channel needs to exceed it)
  *
- * No login in this app — "your channels" are whichever ones this browser's
- * localStorage holds a manage_token for (see lib/local-channels.ts). Live
- * verification status/bid totals are refreshed from the server since
- * localStorage only remembers the token, not current state. The server
- * enforces ownership independently of what this UI shows either way.
+ * There is no login or ownership check anywhere in this app — anyone can
+ * bid on any channel. "Your channels" here just means whichever channels
+ * this browser has previously added (see lib/local-channels.ts), kept
+ * purely as a convenience shortlist so you don't have to hunt down a
+ * channel by slug every time; it grants no special access.
  */
 export function ClaimRankModal({
   targetRank,
@@ -98,7 +98,7 @@ export function ClaimRankModal({
     const res = await fetch('/api/payments/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channelId: selectedId, desiredRank: targetRank, manageToken: selectedChannel.manageToken }),
+      body: JSON.stringify({ channelId: selectedId, desiredRank: targetRank }),
     });
     const data = await res.json();
     setBusy(false);

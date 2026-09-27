@@ -21,9 +21,9 @@ async function main() {
   const { db } = await import('./index');
 
   for (const spec of DEMO_CHANNELS) {
-    // No login in this app — submitChannel auto-generates the manage_token
-    // and referral_code; the seed script just discards manageToken since
-    // there's no browser here to hold onto it.
+    // No login in this app — submitChannel just auto-generates a
+    // referral_code. There is no manage_token or any other credential to
+    // hold onto.
     const { channelId } = await submitChannel({
       rawUrl: spec.handle,
       category: spec.category,
@@ -32,11 +32,8 @@ async function main() {
 
     if (spec.bids.length > 0) {
       mockVerifyChannel(channelId);
-      const channel = db.prepare('SELECT manage_token as manageToken FROM channels WHERE id = ?').get(channelId) as {
-        manageToken: string;
-      };
       for (const amountCents of spec.bids) {
-        const { paymentId } = createPayment({ channelId, manageToken: channel.manageToken, amountCents });
+        const { paymentId } = createPayment({ channelId, amountCents });
         confirmPayment(paymentId, { success: true, providerRef: 'seed_demo' });
       }
     }

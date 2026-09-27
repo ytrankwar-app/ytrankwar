@@ -2,7 +2,6 @@ import { db } from '@/db';
 import { newId } from './ids';
 import { rebuildRankCache, recordRankHistory, getChannelRank } from './leaderboard-service';
 import { minBidCents, minIncrementCents } from './settings';
-import { verifyManageToken } from './manage-auth';
 
 export { minBidCents, minIncrementCents };
 
@@ -22,10 +21,10 @@ function getListing(channelId: string): { totalBidCents: number } {
 }
 
 /** Re-checks the channel's own eligibility to bid — verification status and
- *  moderation state. Does NOT check who's asking; that's a separate,
- *  one-time check at payment creation (see requireOwnership below), since
- *  by the time a payment is confirmed the acting party was already fixed
- *  at creation and can't meaningfully be re-authorized against a webhook. */
+ *  moderation state. There is no login or ownership check anywhere in this
+ *  app, so this is the only gate on bidding: anyone can pay to raise any
+ *  channel's total, as long as the channel itself is verified and not
+ *  suspended/removed. */
 function assertChannelEligible(
   channelId: string
 ): { verificationStatus: string; moderationStatus: string; ownerUserId: string } {
@@ -43,15 +42,6 @@ function assertChannelEligible(
     throw new BiddingError('suspended', 'This channel is currently suspended from paid bidding.');
   }
   return channel;
-}
-
-/** The only place a manage_token is checked for bidding purposes — once, at
- *  payment creation. There is no session to re-check later; possession of
- *  the token at this moment is the entire authorization decision. */
-function requireOwnership(channelId: string, manageToken: string | undefined | null): void {
-  if (!verifyManageToken(channelId, manageToken)) {
-    throw new BiddingError('not_owner', 'This management link is invalid for that channel.');
-  }
 }
 
 export interface BidQuote {
@@ -84,12 +74,10 @@ export function quoteAdditionalForTarget(channelId: string, targetTotalCents: nu
 
 export function createPayment(params: {
   channelId: string;
-  manageToken: string | null | undefined;
   amountCents: number;
   quotedTotalCents?: number;
   quotedRank?: number;
 }): { paymentId: string } {
-  requireOwnership(params.channelId, params.manageToken);
   const channel = assertChannelEligible(params.channelId);
 
   const current = getListing(params.channelId).totalBidCents;
@@ -166,8 +154,7 @@ export function confirmPayment(paymentId: string, opts: { providerRef?: string; 
     // Re-check the channel's own eligibility NOW, inside the lock (it may
     // have been suspended while the payment was in flight) — this is the
     // step that makes concurrent checkouts safe against state changing
-    // between create and confirm. Ownership was already established once,
-    // at creation; there's no session to re-check here.
+    // between create and confirm.
     assertChannelEligible(payment.channel_id);
     const before = getListing(payment.channel_id).totalBidCents;
     const newTotal = before + payment.amount_cents;

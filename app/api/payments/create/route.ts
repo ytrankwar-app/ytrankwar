@@ -10,12 +10,13 @@ import { requiredTotalForRank } from '@/lib/leaderboard-service';
  *      production this step also creates the Stripe Checkout Session and
  *      returns its redirect URL)
  * The actual bid is NOT applied here — only `confirmPayment` (called from
- * the webhook) ever touches `listings`/`bids`. Authorized by manage_token
- * (no login) — see lib/manage-auth.ts.
+ * the webhook) ever touches `listings`/`bids`. There is no login and no
+ * ownership check anywhere in this app — anyone can create a payment
+ * against any (verified, non-suspended) channel.
  */
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
-  const { channelId, desiredRank, manageToken } = body as { channelId: string; desiredRank?: number; manageToken?: string };
+  const { channelId, desiredRank } = body as { channelId: string; desiredRank?: number };
   if (!channelId) return NextResponse.json({ error: 'channelId is required.' }, { status: 400 });
 
   const target = requiredTotalForRank(Number(desiredRank ?? 1));
@@ -24,7 +25,6 @@ export async function POST(req: NextRequest) {
   try {
     const { paymentId } = createPayment({
       channelId,
-      manageToken,
       amountCents: quote.requiredAdditionalCents,
       quotedTotalCents: quote.newTotalCents,
       quotedRank: Number(desiredRank ?? 1),
@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (e) {
     if (e instanceof BiddingError) {
-      const status = e.code === 'not_verified' || e.code === 'not_owner' ? 403 : 400;
+      const status = e.code === 'not_verified' ? 403 : 400;
       return NextResponse.json({ error: e.message, code: e.code }, { status });
     }
     console.error(e);
