@@ -217,3 +217,21 @@ export async function lookupChannel(rawInput: string): Promise<YouTubeChannelInf
 
   return mockLookup(parsed);
 }
+
+/**
+ * Live read of ONE channel's public description straight from the official
+ * Data API (1 quota unit). Used for ownership verification: only the real
+ * owner can edit a channel's description, and the lookup is keyed by the
+ * channel's own permanent UC... id, so proof placed on a different channel
+ * can never satisfy it. Returns null when the channel no longer exists.
+ */
+export async function fetchLiveChannelDescription(
+  youtubeChannelId: string
+): Promise<{ id: string; description: string } | null> {
+  const apiKey = process.env.YOUTUBE_API_KEY;
+  if (!apiKey) throw new YouTubeLookupError('YOUTUBE_API_KEY is not configured.');
+  const data = await callYouTubeApi('channels', { part: 'snippet', id: youtubeChannelId }, apiKey);
+  const item = data.items?.[0];
+  if (!item) return null;
+  return { id: String(item.id), description: String(item.snippet?.description ?? '') };
+}

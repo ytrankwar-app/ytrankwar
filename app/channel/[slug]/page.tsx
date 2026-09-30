@@ -147,8 +147,8 @@ export default async function ChannelProfilePage({
               channelSlug={channel.slug}
               verificationStatus={channel.verification_status}
               autoOpenBid={autoOpenBid}
-              verificationPostText={verificationInfo.postText}
-              verificationCommunityUrl={verificationInfo.communityUrl}
+              verificationLine={verificationInfo.verificationLine}
+              descriptionEditUrl={verificationInfo.descriptionEditUrl}
             />
           </div>
         </div>

@@ -35,13 +35,13 @@ DODO_PRODUCT_ID = "REPLACE_WITH_DODO_PAY_WHAT_YOU_WANT_PRODUCT_ID"
 
 # Attach your main domain (the domain's DNS must be on Cloudflare), then
 # uncomment and deploy again:
- [[routes]]
- pattern = "ytrankwar.lol"
- custom_domain = true
+[[routes]]
+pattern = "ytrankwar.lol"
+custom_domain = true
 #
- [[routes]]
- pattern = "www.ytrankwar.lol"
- custom_domain = true
+[[routes]]
+pattern = "www.ytrankwar.lol"
+custom_domain = true
 
 # [[durable_objects.bindings]]
 # name = "BID_COORDINATOR"

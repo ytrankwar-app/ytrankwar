@@ -82,6 +82,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               </p>
               <nav className="footer-links" aria-label="Footer">
                 <Link href="/rules">Rules</Link>
+                <Link href="/policy">Policy</Link>
+                <Link href="/sitemap.xml" prefetch={false}>Sitemap</Link>
+                <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>
               </nav>
             </div>
           </div>

@@ -18,16 +18,16 @@ export function ChannelActions({
   channelSlug,
   verificationStatus,
   autoOpenBid,
-  verificationPostText,
-  verificationCommunityUrl,
+  verificationLine,
+  descriptionEditUrl,
 }: {
   channelId: string;
   channelName: string;
   channelSlug: string;
   verificationStatus: string;
   autoOpenBid?: boolean;
-  verificationPostText: string;
-  verificationCommunityUrl: string;
+  verificationLine: string;
+  descriptionEditUrl: string;
 }) {
   const [status, setStatus] = useState(verificationStatus);
   const [showBid, setShowBid] = useState(false);
@@ -47,8 +47,9 @@ export function ChannelActions({
   // open the bid modal automatically so the visitor doesn't have to find
   // and click the button themselves.
   useEffect(() => {
-    if (autoOpenBid && !autoOpened && status === 'verified') {
-      setShowBid(true);
+    if (autoOpenBid && !autoOpened) {
+      if (status === 'verified') setShowBid(true);
+      else setShowVerify(true); // must prove ownership before bidding
       setAutoOpened(true);
     }
   }, [autoOpenBid, autoOpened, status]);
@@ -76,8 +77,8 @@ export function ChannelActions({
         <div className="card" style={{ marginTop: 16 }}>
           <CommunityPostVerify
             channelId={channelId}
-            postText={verificationPostText}
-            communityUrl={verificationCommunityUrl}
+            verificationLine={verificationLine}
+            descriptionEditUrl={descriptionEditUrl}
             onVerified={() => {
               setStatus('verified');
               setShowVerify(false);

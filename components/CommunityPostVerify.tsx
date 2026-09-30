@@ -2,49 +2,50 @@
 
 import { useState } from 'react';
 
+// Ownership check: the owner adds one line to the channel DESCRIPTION (only
+// the owner can edit it) and we re-read that channel's description from the
+// YouTube Data API. Nothing typed here is used as proof.
 export function CommunityPostVerify({
   channelId,
-  postText,
-  communityUrl,
+  verificationLine,
+  descriptionEditUrl,
   onVerified,
 }: {
   channelId: string;
-  postText: string;
-  communityUrl: string;
+  verificationLine: string;
+  descriptionEditUrl: string;
   onVerified: () => void;
 }) {
-  const [postUrl, setPostUrl] = useState('');
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function copyText() {
     try {
-      await navigator.clipboard.writeText(postText);
+      await navigator.clipboard.writeText(verificationLine);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Clipboard API unavailable (e.g. insecure context) — the text is
-      // still shown and selectable, so this is a soft failure only.
+      // Clipboard unavailable — the text is still shown and selectable.
     }
   }
 
-  async function submitProof(e: React.FormEvent) {
-    e.preventDefault();
+  async function check() {
     setBusy(true);
     setError(null);
-    const res = await fetch(`/api/channels/${channelId}/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ postUrl }),
-    });
-    const data = await res.json();
-    setBusy(false);
-    if (!res.ok) {
-      setError(data.error || 'Could not verify that post.');
-      return;
+    try {
+      const res = await fetch(`/api/channels/${channelId}/verify`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.error || 'Could not verify this channel.');
+        return;
+      }
+      onVerified();
+    } catch {
+      setError('Network error. Please try again.');
+    } finally {
+      setBusy(false);
     }
-    onVerified();
   }
 
   return (
@@ -52,8 +53,8 @@ export function CommunityPostVerify({
       <div className="verify-step">
         <div className="verify-step-num">1</div>
         <div>
-          <p className="verify-step-title">Get your verification post</p>
-          <div className="verify-post-text">{postText}</div>
+          <p className="verify-step-title">Copy your verification line</p>
+          <div className="verify-post-text">{verificationLine}</div>
           <button type="button" className="btn btn-secondary btn-compact" onClick={copyText}>
             {copied ? 'Copied!' : 'Copy'}
           </button>
@@ -63,13 +64,14 @@ export function CommunityPostVerify({
       <div className="verify-step">
         <div className="verify-step-num">2</div>
         <div>
-          <p className="verify-step-title">Post it to your channel's Community tab</p>
+          <p className="verify-step-title">Add it to your channel description</p>
           <p className="muted small">
-            Only your channel's owner can post there, which is what proves this channel is yours. YouTube doesn't
-            let us pre-fill the post for you — paste the copied text in yourself.
+            In YouTube Studio go to Customization → Basic info → Description, paste the line anywhere, and click
+            Publish. Only the channel's owner can edit the description, which is what proves the channel is yours.
+            You can delete the line again after verification.
           </p>
-          <a className="btn btn-secondary btn-compact" href={communityUrl} target="_blank" rel="noreferrer noopener">
-            Open YouTube Community
+          <a className="btn btn-secondary btn-compact" href={descriptionEditUrl} target="_blank" rel="noreferrer noopener">
+            Open YouTube Studio
           </a>
         </div>
       </div>
@@ -77,20 +79,11 @@ export function CommunityPostVerify({
       <div className="verify-step">
         <div className="verify-step-num">3</div>
         <div style={{ width: '100%' }}>
-          <p className="verify-step-title">Paste the link to your post</p>
-          <form onSubmit={submitProof} style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <input
-              type="url"
-              placeholder="https://youtube.com/@yourhandle/community"
-              value={postUrl}
-              onChange={(e) => setPostUrl(e.target.value)}
-              required
-              style={{ flex: '1 1 220px', minWidth: 0, padding: 10, borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text)' }}
-            />
-            <button className="btn btn-primary btn-compact" type="submit" disabled={busy}>
-              {busy ? 'Checking…' : 'Verify'}
-            </button>
-          </form>
+          <p className="verify-step-title">Check my channel</p>
+          <p className="muted small">It can take a minute for YouTube to show the change.</p>
+          <button className="btn btn-primary btn-compact" type="button" onClick={check} disabled={busy}>
+            {busy ? 'Checking…' : 'Verify'}
+          </button>
           {error && <p className="small" style={{ color: 'var(--danger)' }}>{error}</p>}
         </div>
       </div>

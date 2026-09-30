@@ -76,7 +76,16 @@ export async function POST(req: NextRequest) {
     } catch (e) {
       await markPaymentFailedToStart(paymentId, e instanceof Error ? e.message : 'checkout failed');
       if (e instanceof DodoError) {
-        return jsonError('We could not start checkout. You have not been charged. Please try again.', 502, 'provider_error');
+        return NextResponse.json(
+          {
+            error: 'We could not start checkout. You have not been charged. Please try again.',
+            code: 'provider_error',
+            // HTTP status Dodo answered with (null = could not reach Dodo). Not sensitive;
+            // the full reason is in the Worker logs (`wrangler tail`).
+            providerStatus: e.status ?? null,
+          },
+          { status: 502 }
+        );
       }
       throw e;
     }

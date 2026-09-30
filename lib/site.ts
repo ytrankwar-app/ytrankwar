@@ -8,7 +8,7 @@
 //      even if SITE_URL was forgotten.
 //   3. http://localhost:3000 outside a request (e.g. a build step).
 
-const PLACEHOLDER_HOSTS = /(^|\.)example(\.|$)/i;
+const PLACEHOLDER_HOSTS = /(^|\.)example(\.|$)|replace[-_]with/i;
 
 function clean(url: string): string {
   return url.replace(/\/+$/, '');

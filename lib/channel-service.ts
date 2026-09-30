@@ -1,15 +1,20 @@
 import { getDb } from '@/db';
 import { newId, slugify } from './ids';
-import { lookupChannel, YouTubeLookupError } from './youtube';
+import { lookupChannel, normalizeYouTubeInput, YouTubeLookupError } from './youtube';
 import { newReferralCode } from './verification-service';
 
 export class ChannelError extends Error {
   code: string;
-  constructor(code: string, message: string) {
+  /** For `duplicate`: the existing channel, so the UI can link to it. */
+  existing?: { slug: string; name: string };
+  constructor(code: string, message: string, existing?: { slug: string; name: string }) {
     super(message);
     this.code = code;
+    this.existing = existing;
   }
 }
+
+const ALREADY_ADDED = 'This channel is already added.';
 
 export interface SubmitChannelResult {
   channelId: string;
@@ -24,6 +29,32 @@ export async function submitChannel(params: {
   category?: string | null;
   country?: string | null;
 }): Promise<SubmitChannelResult> {
+  const db0 = await getDb();
+
+  // Cheap pre-check BEFORE calling YouTube: if the pasted URL/handle/id
+  // already matches a listed channel, stop right here. This saves API quota
+  // and never creates a second row.
+  try {
+    const parsed = normalizeYouTubeInput(params.rawUrl);
+    let found: { slug: string; name: string } | null = null;
+    if (parsed.kind === 'id') {
+      found = await db0.first<{ slug: string; name: string }>(
+        'SELECT slug, name FROM channels WHERE youtube_channel_id = ?',
+        [parsed.value]
+      );
+    } else if (parsed.kind === 'handle') {
+      const h = parsed.value.startsWith('@') ? parsed.value : `@${parsed.value}`;
+      found = await db0.first<{ slug: string; name: string }>(
+        'SELECT slug, name FROM channels WHERE handle = ? COLLATE NOCASE',
+        [h]
+      );
+    }
+    if (found) throw new ChannelError('duplicate', ALREADY_ADDED, found);
+  } catch (e) {
+    if (e instanceof ChannelError) throw e;
+    // Unparseable input is reported by lookupChannel below with its own message.
+  }
+
   let info;
   try {
     info = await lookupChannel(params.rawUrl);
@@ -34,11 +65,12 @@ export async function submitChannel(params: {
 
   const db = await getDb();
 
-  const existing = await db.first<{ id: string }>('SELECT id FROM channels WHERE youtube_channel_id = ?', [
-    info.youtubeChannelId,
-  ]);
+  const existing = await db.first<{ slug: string; name: string }>(
+    'SELECT slug, name FROM channels WHERE youtube_channel_id = ?',
+    [info.youtubeChannelId]
+  );
   if (existing) {
-    throw new ChannelError('duplicate', 'This channel is already listed.');
+    throw new ChannelError('duplicate', ALREADY_ADDED, existing);
   }
 
   const category = await validCategory(params.category);
@@ -111,10 +143,11 @@ export async function submitChannel(params: {
       if (/UNIQUE|constraint/i.test(msg)) {
         // Lost a race: either the same channel was added a moment ago, or the
         // slug/referral code collided. Re-check, then retry with a new slug.
-        const dupe = await db.first('SELECT 1 as x FROM channels WHERE youtube_channel_id = ?', [
-          info.youtubeChannelId,
-        ]);
-        if (dupe) throw new ChannelError('duplicate', 'This channel is already listed.');
+        const dupe = await db.first<{ slug: string; name: string }>(
+          'SELECT slug, name FROM channels WHERE youtube_channel_id = ?',
+          [info.youtubeChannelId]
+        );
+        if (dupe) throw new ChannelError('duplicate', ALREADY_ADDED, dupe);
         continue;
       }
       throw e;
@@ -145,6 +178,10 @@ async function validCountry(code?: string | null): Promise<string | null> {
  * require a genuine check even on this path.
  */
 export async function mockVerifyChannel(channelId: string): Promise<void> {
+  // Never allowed in production: it would let anyone claim any channel.
+  if (process.env.NODE_ENV !== 'development') {
+    throw new ChannelError('forbidden', 'Instant verification is not available.');
+  }
   const db = await getDb();
   const channel = await db.first('SELECT id FROM channels WHERE id = ?', [channelId]);
   if (!channel) throw new ChannelError('not_found', "We couldn't find that channel.");

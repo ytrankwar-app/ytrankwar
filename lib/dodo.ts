@@ -29,10 +29,16 @@ export function dodoBaseUrl(env: string | undefined): string {
   return (env || '').toLowerCase() === 'live_mode' ? 'https://live.dodopayments.com' : 'https://test.dodopayments.com';
 }
 
+/** True for empty values and for template placeholders like "REPLACE_WITH_...". */
+function isRealValue(v: string | undefined): v is string {
+  const t = (v || '').trim();
+  return t.length > 0 && !/^(replace|your_|changeme|todo|xxx)/i.test(t) && !/REPLACE[_-]WITH/i.test(t);
+}
+
 export function getDodoConfig(): DodoConfig {
   const apiKey = process.env.DODO_PAYMENTS_API_KEY;
   const productId = process.env.DODO_PRODUCT_ID;
-  if (!apiKey || !productId) {
+  if (!isRealValue(apiKey) || !isRealValue(productId)) {
     throw new DodoError(
       'Payments are not configured yet (DODO_PAYMENTS_API_KEY / DODO_PRODUCT_ID are missing).'
     );
@@ -41,7 +47,20 @@ export function getDodoConfig(): DodoConfig {
 }
 
 export function isDodoConfigured(): boolean {
-  return Boolean(process.env.DODO_PAYMENTS_API_KEY && process.env.DODO_PRODUCT_ID);
+  return isRealValue(process.env.DODO_PAYMENTS_API_KEY) && isRealValue(process.env.DODO_PRODUCT_ID);
+}
+
+/** Plain-English hint for the operator (logs only, never shown to customers). */
+export function dodoFailureHint(status: number | undefined, baseUrl: string): string {
+  const mode = baseUrl.includes('test.') ? 'test_mode' : 'live_mode';
+  if (status === 401 || status === 403)
+    return `Dodo rejected the API key. The key must belong to ${mode} (DODO_PAYMENTS_ENVIRONMENT currently selects ${mode}). Test keys need test_mode, live keys need live_mode; also re-run "wrangler secret put DODO_PAYMENTS_API_KEY" and redeploy.`;
+  if (status === 404)
+    return `Dodo could not find DODO_PRODUCT_ID in ${mode}. Products are separate per mode: use a ${mode} product id.`;
+  if (status === 400 || status === 422)
+    return 'Dodo rejected the request body. Usual causes: the product is not "Pay What You Want", or the amount is below its minimum / above its maximum.';
+  if (status === 429) return 'Dodo rate limit hit.';
+  return 'Unexpected response from Dodo; see the status and body above.';
 }
 
 export async function createCheckoutSession(params: {
@@ -73,12 +92,13 @@ export async function createCheckoutSession(params: {
   if (!res.ok) {
     let detail = '';
     try {
-      const body = (await res.json()) as { message?: string; error?: string };
-      detail = body.message || body.error || '';
+      detail = (await res.text()).slice(0, 500); // raw body: Dodo's shape varies by error
     } catch {
-      // not JSON
+      // unreadable body
     }
-    console.error(`[dodo] create checkout failed (${res.status}): ${detail}`);
+    console.error(
+      `[dodo] create checkout failed: HTTP ${res.status} from ${cfg.baseUrl} | body: ${detail} | hint: ${dodoFailureHint(res.status, cfg.baseUrl)}`
+    );
     throw new DodoError('The payment provider rejected the checkout request.', res.status);
   }
 

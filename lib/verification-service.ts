@@ -1,6 +1,7 @@
 import { customAlphabet } from 'nanoid';
 import { getDb, NOW_SQL } from '@/db';
 import { newId } from './ids';
+import { fetchLiveChannelDescription, YouTubeLookupError } from './youtube';
 
 // Alphabet excludes 0/O/1/I to avoid transcription mistakes if anyone
 // copies it by hand; mainly used as a short, readable path segment for the
@@ -19,6 +20,10 @@ export interface VerificationInfo {
   postText: string;
   communityUrl: string;
   studioUrl: string;
+  /** The exact line the owner must add to the channel description. */
+  verificationLine: string;
+  /** Where the owner edits the channel description. */
+  descriptionEditUrl: string;
 }
 
 /**
@@ -40,7 +45,9 @@ export function getVerificationInfo(
     ? `https://www.youtube.com/${channel.handle}/community`
     : `https://www.youtube.com/channel/${channel.youtubeChannelId}/community`;
   const studioUrl = `https://studio.youtube.com/channel/${channel.youtubeChannelId}/community`;
-  return { referralCode, referralUrl, postText, communityUrl, studioUrl };
+  const verificationLine = `ytrankwar verification: ${referralCode}`;
+  const descriptionEditUrl = `https://studio.youtube.com/channel/${channel.youtubeChannelId}/editing/details`;
+  return { referralCode, referralUrl, postText, communityUrl, studioUrl, verificationLine, descriptionEditUrl };
 }
 
 export class VerificationError extends Error {
@@ -51,79 +58,104 @@ export class VerificationError extends Error {
   }
 }
 
-/**
- * MOCK check. YouTube doesn't currently expose a public API for reading
- * Community posts, so a real production implementation would most likely
- * need a server-side fetch of the public community-tab page and a check
- * that the posted text actually contains the referral link — genuinely
- * confirming the post exists and links back correctly. This mock only
- * checks that the submitted URL is *structurally* a plausible YouTube
- * community-post link (right domain, right shape, ideally matching this
- * channel's handle or id) — it does NOT fetch or read the real post
- * content. Do not treat this as a substitute for the real check above.
- */
-export function looksLikeOwnCommunityPost(url: string, handle: string | null, youtubeChannelId: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
-  if (host !== 'youtube.com' && host !== 'm.youtube.com') return false;
-
-  const path = parsed.pathname.toLowerCase();
-  const looksLikeCommunityShape = path.includes('/community') || path.includes('/post/');
-  if (!looksLikeCommunityShape) return false;
-
-  // Stronger signal when the URL's own path happens to embed this
-  // channel's handle or id (e.g. youtube.com/@handle/community) — accept
-  // immediately in that case. Real community-post permalinks
-  // (youtube.com/post/Ug...) often don't embed either, though, so a
-  // correctly-shaped URL without a match is still accepted below rather
-  // than rejected — see the limits of this mock documented above.
-  const normalizedHandle = handle?.toLowerCase().replace(/^@/, '');
-  if (normalizedHandle && path.includes(normalizedHandle)) return true;
-  if (path.includes(youtubeChannelId.toLowerCase())) return true;
-
-  return true;
+/** True when the description contains this channel's code (case-insensitive). */
+export function descriptionHasCode(description: string, code: string): boolean {
+  if (!code || code === 'MISSING-CODE') return false;
+  return description.toUpperCase().includes(code.toUpperCase());
 }
 
+const RETRY_COOLDOWN_SECONDS = 10;
+
 /**
- * Records the submitted proof and marks the channel verified. There is no
- * login or ownership token anywhere in this app — the structural check in
- * looksLikeOwnCommunityPost above (and, in a real deployment, actually
- * reading the post back) is the only gate, since only the real channel
- * owner can post to that channel's own Community tab.
+ * Real ownership check. The owner adds `ytrankwar verification: <code>` to
+ * their channel DESCRIPTION (only the owner can edit it). We then read that
+ * SAME channel's description live from the official YouTube Data API, keyed
+ * by the channel's own permanent id, and require the code to be there.
+ *
+ *  - Proof on a different channel can never pass: we never look at a URL the
+ *    caller supplies, only at the target channel's own description.
+ *  - No API key => we refuse (never auto-verify) outside `next dev`.
  */
-export async function submitCommunityPostProof(params: {
-  channelId: string;
-  postUrl: string;
-  referralCode: string;
-  handle: string | null;
-  youtubeChannelId: string;
-}): Promise<void> {
-  if (!looksLikeOwnCommunityPost(params.postUrl, params.handle, params.youtubeChannelId)) {
+export async function verifyChannelOwnership(channelId: string): Promise<void> {
+  const db = await getDb();
+  const channel = await db.first<{
+    ownerUserId: string;
+    youtubeChannelId: string;
+    referralCode: string | null;
+    verificationStatus: string;
+  }>(
+    `SELECT owner_user_id as ownerUserId, youtube_channel_id as youtubeChannelId,
+            referral_code as referralCode, verification_status as verificationStatus
+     FROM channels WHERE id = ?`,
+    [channelId]
+  );
+  if (!channel) throw new VerificationError('not_found', "We couldn't find that channel.");
+  if (channel.verificationStatus === 'verified') return;
+
+  const code = channel.referralCode ?? '';
+
+  // Local development without a YouTube key: allow so the flow can be tried.
+  // In production (no key) verification is unavailable rather than skipped.
+  if (!process.env.YOUTUBE_API_KEY) {
+    if (process.env.NODE_ENV !== 'development') {
+      console.error('[verify] YOUTUBE_API_KEY is not configured; ownership cannot be checked.');
+      throw new VerificationError('unavailable', 'Verification is temporarily unavailable. Please try again later.');
+    }
+    await markVerified(channelId, channel.ownerUserId, code, 'dev-no-youtube-key');
+    return;
+  }
+
+  // Cheap brake on hammering the YouTube quota for one channel.
+  const recent = await db.first(
+    `SELECT 1 as x FROM channel_ownership_tokens
+     WHERE channel_id = ? AND status = 'rejected'
+       AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-${RETRY_COOLDOWN_SECONDS} seconds')`,
+    [channelId]
+  );
+  if (recent) {
+    throw new VerificationError('too_fast', `Please wait ${RETRY_COOLDOWN_SECONDS} seconds before checking again.`);
+  }
+
+  let live: { id: string; description: string } | null;
+  try {
+    live = await fetchLiveChannelDescription(channel.youtubeChannelId);
+  } catch (e) {
+    if (e instanceof YouTubeLookupError) {
+      console.error('[verify] YouTube lookup failed:', e.message);
+      throw new VerificationError('unavailable', 'Verification is temporarily unavailable. Please try again later.');
+    }
+    throw e;
+  }
+
+  // The returned channel must be exactly the one we are verifying.
+  if (!live || live.id !== channel.youtubeChannelId) {
+    throw new VerificationError('not_found', "We couldn't read that YouTube channel. Please try again later.");
+  }
+
+  if (!descriptionHasCode(live.description, code)) {
+    await db.run(
+      `INSERT INTO channel_ownership_tokens (id, channel_id, user_id, token, status, resolved_at)
+       VALUES (?, ?, ?, ?, 'rejected', ${NOW_SQL})`,
+      [newId('tok'), channelId, channel.ownerUserId, code]
+    );
     throw new VerificationError(
-      'invalid_proof',
-      "That doesn't look like a YouTube Community post link. Paste the URL of the post itself (it should look like youtube.com/@yourhandle/community or youtube.com/post/...)."
+      'code_not_found',
+      "We couldn't find the verification line in this channel's description yet. Save it in YouTube Studio, wait a minute, and check again."
     );
   }
 
-  const db = await getDb();
-  const channel = await db.first<{ ownerUserId: string }>(
-    'SELECT owner_user_id as ownerUserId FROM channels WHERE id = ?',
-    [params.channelId]
-  );
-  if (!channel) throw new VerificationError('not_found', "We couldn't find that channel.");
+  await markVerified(channelId, channel.ownerUserId, code, 'description');
+}
 
+async function markVerified(channelId: string, userId: string, code: string, method: string): Promise<void> {
+  const db = await getDb();
   // One atomic batch: the audit row and the status change land together.
   await db.batch([
     {
       sql: `INSERT INTO channel_ownership_tokens (id, channel_id, user_id, token, proof_url, status, resolved_at)
             VALUES (?, ?, ?, ?, ?, 'verified', ${NOW_SQL})`,
-      params: [newId('tok'), params.channelId, channel.ownerUserId, params.referralCode, params.postUrl.slice(0, 500)],
+      params: [newId('tok'), channelId, userId, code, `method:${method}`],
     },
-    { sql: `UPDATE channels SET verification_status = 'verified' WHERE id = ?`, params: [params.channelId] },
+    { sql: `UPDATE channels SET verification_status = 'verified' WHERE id = ?`, params: [channelId] },
   ]);
 }

@@ -116,6 +116,28 @@ Every later release is just `npm run deploy`. Migrations are applied in order an
 
 ---
 
+## Ownership verification
+
+A channel is only marked `verified` after the owner proves control of **that exact channel**:
+
+1. The channel page shows a line like `ytrankwar verification: YTW-XXXXXXXX`.
+2. The owner pastes it into the channel **description** (YouTube Studio > Customization > Basic info) and publishes.
+3. The server re-reads that channel's description from the YouTube Data API (keyed by the channel's own `UC...` id)
+   and requires the code to be present. Nothing the browser sends is treated as proof, so a post or code on a
+   different channel cannot verify someone else's channel.
+
+`YOUTUBE_API_KEY` is therefore **required in production**; without it verification returns 503 instead of
+approving. The `premium` flag on `POST /api/channels` never verifies anything.
+
+If you deployed an earlier version, review channels that were verified without proof:
+
+```bash
+npx wrangler d1 execute ytrankwar-db --remote --command \
+  "SELECT id, slug, name FROM channels WHERE verification_status='verified' AND id NOT IN (SELECT channel_id FROM channel_ownership_tokens WHERE status='verified' AND proof_url LIKE 'method:%')"
+```
+
+---
+
 ## How payments work
 
 1. The browser asks `POST /api/payments/create` to bid for a rank. The server recomputes the price itself (never

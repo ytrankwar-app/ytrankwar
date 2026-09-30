@@ -56,21 +56,24 @@ export async function POST(req: NextRequest) {
       country: typeof body.country === 'string' ? body.country.slice(0, 2).toUpperCase() : null,
     });
 
-    // "Premium" only changes what happens right after listing (skip the
-    // manual verify step so the user can head straight into bidding) — the
-    // listing itself is free either way, per the spec's free/paid
-    // distinction. Auto-verification is only reasonable in this demo
-    // because verification is itself a mock; production would still
-    // require the real OAuth/token verification here too.
-    if (premium) {
+    // "Premium" only means "take me to the bidding step afterwards". It NEVER
+    // verifies ownership: the client controls this flag, so trusting it
+    // would let anyone claim any channel. Ownership is proven only through
+    // /api/channels/:id/verify. (Local `next dev` keeps a shortcut.)
+    let verified = false;
+    if (premium && process.env.NODE_ENV === 'development') {
       await mockVerifyChannel(result.channelId);
+      verified = true;
     }
 
-    return NextResponse.json({ ...result, verified: premium }, { status: 201 });
+    return NextResponse.json({ ...result, verified }, { status: 201 });
   } catch (e) {
     if (e instanceof ChannelError) {
       const status = e.code === 'duplicate' ? 409 : 400;
-      return NextResponse.json({ error: e.message, code: e.code }, { status });
+      return NextResponse.json(
+        { error: e.message, code: e.code, ...(e.existing ? { existing: e.existing } : {}) },
+        { status }
+      );
     }
     console.error('[api/channels POST]', e);
     return jsonError('Something went wrong submitting your channel.', 500);

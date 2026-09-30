@@ -8,7 +8,7 @@ export function AddChannelForm() {
   const [url, setUrl] = useState('');
   const [category, setCategory] = useState('');
   const [busyMode, setBusyMode] = useState<'free' | 'premium' | null>(null);
-  const [message, setMessage] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
+  const [message, setMessage] = useState<{ type: 'error' | 'success'; text: string; href?: string } | null>(null);
 
   async function submit(premium: boolean) {
     setBusyMode(premium ? 'premium' : 'free');
@@ -20,6 +20,16 @@ export function AddChannelForm() {
     });
     const data = await res.json();
     setBusyMode(null);
+    if (res.status === 409 && data.code === 'duplicate') {
+      // Already listed: do NOT add it again and do not redirect. Just tell
+      // the user and link to the existing page.
+      setMessage({
+        type: 'error',
+        text: 'This channel is already added.',
+        href: data.existing?.slug ? `/channel/${data.existing.slug}` : undefined,
+      });
+      return;
+    }
     if (!res.ok) {
       setMessage({ type: 'error', text: data.error || 'Something went wrong.' });
       return;
@@ -82,6 +92,12 @@ export function AddChannelForm() {
       {message && (
         <p className="small" style={{ color: message.type === 'error' ? 'var(--danger)' : 'var(--accent)' }}>
           {message.text}
+          {message.href && (
+            <>
+              {' '}
+              <a href={message.href} style={{ textDecoration: 'underline' }}>View channel page</a>
+            </>
+          )}
         </p>
       )}
     </div>
