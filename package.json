@@ -4,25 +4,23 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev",
+    "dev": "npm run d1:migrate:local && next dev",
     "build": "next build",
-    "start": "next start",
     "cf:build": "opennextjs-cloudflare build",
-    "cf:preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "cf:preview": "npm run d1:migrate:local && opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "deploy": "npm run d1:migrate:remote && opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "typecheck": "tsc --noEmit",
-    "db:migrate": "tsx db/migrate.ts",
     "db:seed": "tsx db/seed.ts",
     "test": "tsx --test test/*.test.ts",
     "check:youtube-key": "tsx scripts/check-youtube-key.ts",
     "db:refresh-stats": "tsx scripts/refresh-channel-stats.ts",
     "d1:migrate:local": "wrangler d1 migrations apply ytrankwar-db --local",
     "d1:migrate:remote": "wrangler d1 migrations apply ytrankwar-db --remote",
-    "workers:typecheck": "tsc --noEmit -p workers/tsconfig.json",
-    "workers:verify-concurrency": "sh workers/verify-concurrency-proof.sh"
+    "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
+    "dev:fast": "next dev",
+    "d1:reset:local": "node -e \"require('fs').rmSync('.wrangler/state',{recursive:true,force:true})\" && npm run d1:migrate:local"
   },
   "dependencies": {
-    "better-sqlite3": "13.0.3",
     "nanoid": "5.0.7",
     "next": "14.2.35",
     "react": "18.3.1",
@@ -30,13 +28,15 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260914.1",
-    "@opennextjs/cloudflare": "^1.10.0",
-    "@types/better-sqlite3": "9.6.0",
-    "@types/node": "20.14.11",
+    "@opennextjs/cloudflare": "1.10.0",
+    "@types/node": "^22.20.4",
     "@types/react": "18.3.3",
     "@types/react-dom": "18.3.0",
     "tsx": "4.16.2",
     "typescript": "5.5.4",
     "wrangler": "^4.141.0"
+  },
+  "engines": {
+    "node": ">=22.5.0"
   }
 }

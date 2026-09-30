@@ -1,38 +1,96 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { confirmPayment, BiddingError } from '@/lib/bidding-service';
+import { verifyWebhook } from '@/lib/dodo';
+import {
+  confirmPayment,
+  findPaymentIdBySession,
+  getPayment,
+  markPaymentReversed,
+  noteFailedAttempt,
+} from '@/lib/bidding-service';
 
-// MOCK payment webhook, standing in for Stripe's `checkout.session.completed`
-// (and `payment_intent.payment_failed`) events.
+export const dynamic = 'force-dynamic';
+
+interface DodoEvent {
+  type?: string;
+  data?: {
+    payment_id?: string;
+    checkout_session_id?: string | null;
+    metadata?: Record<string, string> | null;
+    error_message?: string | null;
+  };
+}
+
+// Dodo Payments webhook. This is the ONLY authoritative way a bid is applied:
+//   - the signature is verified against the raw body (Standard Webhooks)
+//   - the payment row is looked up from OUR OWN id, which we put in the
+//     checkout metadata server-side
+//   - confirmPayment is idempotent, so Dodo's retries are harmless
 //
-// In production:
-//   - verify the Stripe-Signature header against STRIPE_WEBHOOK_SECRET
-//     using stripe.webhooks.constructEvent before touching anything below
-//   - never accept `success` from a query string — read it from the
-//     verified event payload
-//   - Stripe (and any provider) can and will redeliver the same event;
-//     confirmPayment() is idempotent specifically so redelivery is safe
-//
-// This demo exposes it as a simple GET/POST so the "Simulate payment"
-// button in the UI can trigger it without a real payment provider.
+// Response codes matter: 2xx tells Dodo to stop retrying, anything else makes
+// it retry with backoff. So invalid signatures get 401 (never retried into
+// success), transient errors get 500 (retried), and events we do not care
+// about get 200.
 export async function POST(req: NextRequest) {
-  const body = await req.json().catch(() => ({}));
-  return handle(body.paymentId, body.success !== false, body.providerRef);
-}
+  const secret = process.env.DODO_PAYMENTS_WEBHOOK_KEY;
+  if (!secret) {
+    console.error('[payments/webhook] DODO_PAYMENTS_WEBHOOK_KEY is not set.');
+    return NextResponse.json({ error: 'Webhook is not configured.' }, { status: 500 });
+  }
 
-export async function GET(req: NextRequest) {
-  const paymentId = req.nextUrl.searchParams.get('paymentId') || '';
-  const success = req.nextUrl.searchParams.get('success') !== 'false';
-  return handle(paymentId, success, undefined);
-}
+  const rawBody = await req.text();
+  const ok = await verifyWebhook({
+    rawBody,
+    id: req.headers.get('webhook-id'),
+    timestamp: req.headers.get('webhook-timestamp'),
+    signatureHeader: req.headers.get('webhook-signature'),
+    secret,
+  });
+  if (!ok) return NextResponse.json({ error: 'Invalid signature.' }, { status: 401 });
 
-function handle(paymentId: string, success: boolean, providerRef?: string) {
-  if (!paymentId) return NextResponse.json({ error: 'paymentId is required.' }, { status: 400 });
+  let event: DodoEvent;
   try {
-    const result = confirmPayment(paymentId, { success, providerRef: providerRef ?? `mock_${Date.now()}` });
-    return NextResponse.json(result);
+    event = JSON.parse(rawBody) as DodoEvent;
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON.' }, { status: 400 });
+  }
+
+  const type = event.type || '';
+  const data = event.data || {};
+
+  try {
+    // Resolve our payment id: metadata first, then the checkout session id.
+    let paymentId: string | null = data.metadata?.payment_id ?? null;
+    if (!paymentId && data.checkout_session_id) paymentId = await findPaymentIdBySession(data.checkout_session_id);
+
+    switch (type) {
+      case 'payment.succeeded': {
+        if (!paymentId) return NextResponse.json({ ok: true, ignored: 'no matching payment' });
+        if (!(await getPayment(paymentId))) return NextResponse.json({ ok: true, ignored: 'unknown payment' });
+        const result = await confirmPayment(paymentId, { providerRef: data.payment_id, success: true });
+        return NextResponse.json({ ok: true, applied: result.applied });
+      }
+      case 'payment.failed': {
+        // Not terminal: the customer may retry inside the same checkout.
+        if (paymentId) await noteFailedAttempt(paymentId, data.error_message ?? undefined);
+        return NextResponse.json({ ok: true });
+      }
+      case 'refund.succeeded': {
+        const ref = data.payment_id;
+        if (ref) await markPaymentReversed(ref, 'refunded', 'Refunded via Dodo Payments — review whether to adjust the bid.');
+        return NextResponse.json({ ok: true });
+      }
+      case 'dispute.opened':
+      case 'dispute.lost': {
+        const ref = data.payment_id;
+        if (ref) await markPaymentReversed(ref, 'disputed', `Dodo Payments event ${type} — review the bid.`);
+        return NextResponse.json({ ok: true });
+      }
+      default:
+        return NextResponse.json({ ok: true, ignored: type || 'unknown' });
+    }
   } catch (e) {
-    if (e instanceof BiddingError) return NextResponse.json({ error: e.message }, { status: 400 });
-    console.error(e);
-    return NextResponse.json({ error: 'Webhook processing failed.' }, { status: 500 });
+    console.error('[payments/webhook]', type, e);
+    // 500 -> Dodo retries. confirmPayment is idempotent, so that is safe.
+    return NextResponse.json({ error: 'Processing failed.' }, { status: 500 });
   }
 }

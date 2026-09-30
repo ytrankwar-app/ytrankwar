@@ -1,61 +1,93 @@
-import Database from 'better-sqlite3';
-import fs from 'node:fs';
-import path from 'node:path';
+// Database access layer.
+//
+// The app runs on Cloudflare Workers (via OpenNext) against a D1 database,
+// both in production and in `next dev` / `npm run preview` (where the D1
+// binding is emulated locally by Wrangler — see initOpenNextCloudflareForDev
+// in next.config.mjs). There is exactly one code path, so what works locally
+// is what runs on the main domain.
+//
+// This module deliberately imports NOTHING Node-specific, so it is safe to
+// bundle into the Worker. Unit tests inject a Node-side SQLite adapter with
+// setDb() (see db/sqlite-adapter.ts, which is only ever imported by tests
+// and local scripts — never by app code).
 
-// In production on Cloudflare this file's queries are the same shape you'd
-// run against D1 (also SQLite). Swap this module for a D1 binding-backed
-// client and every service in /lib keeps working unchanged.
+export type SqlParam = string | number | null;
 
-const DB_PATH = process.env.SQLITE_PATH || path.join(process.cwd(), 'data', 'app.db');
-
-function ensureDir(p: string) {
-  const dir = path.dirname(p);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+export interface Statement {
+  sql: string;
+  params?: SqlParam[];
 }
 
-declare global {
-  // eslint-disable-next-line no-var
-  var __db: Database.Database | undefined;
+export interface Db {
+  /** All rows of a query. */
+  all<T = Record<string, unknown>>(sql: string, params?: SqlParam[]): Promise<T[]>;
+  /** First row of a query, or null. */
+  first<T = Record<string, unknown>>(sql: string, params?: SqlParam[]): Promise<T | null>;
+  /** Run a write statement. `changes` is the number of rows affected. */
+  run(sql: string, params?: SqlParam[]): Promise<{ changes: number }>;
+  /**
+   * Run several statements as ONE atomic unit: either every statement is
+   * applied or none is. D1 has no interactive transactions, so this (plus
+   * conditional SQL — see lib/bidding-service.ts) is how money-critical
+   * writes stay consistent.
+   */
+  batch(statements: Statement[]): Promise<{ changes: number }[]>;
 }
 
-function createConnection(): Database.Database {
-  ensureDir(DB_PATH);
-  const db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  const schema = fs.readFileSync(path.join(process.cwd(), 'db', 'schema.sql'), 'utf-8');
+// Minimal structural types for the parts of D1 we use, so this file does not
+// depend on (or conflict with) the global Workers type definitions.
+interface D1PreparedLike {
+  bind(...values: unknown[]): D1PreparedLike;
+  all(): Promise<{ results?: unknown[] }>;
+  first(): Promise<unknown | null>;
+  run(): Promise<{ meta?: { changes?: number } }>;
+}
+export interface D1Like {
+  prepare(sql: string): D1PreparedLike;
+  batch(statements: D1PreparedLike[]): Promise<{ meta?: { changes?: number } }[]>;
+}
 
-  try {
-    db.exec(schema);
-  } catch (err) {
-    // This project has no real migration system (see README) — schema.sql
-    // uses CREATE TABLE IF NOT EXISTS everywhere, which means re-applying it
-    // against a database file created by an OLDER version of schema.sql
-    // silently does nothing to already-existing tables. If a later version
-    // added a column or an index on a new column, applying the schema then
-    // fails right here, and every route that imports this module 500s with
-    // a cryptic "no such column" error that gives no hint why.
-    //
-    // The fix is always the same: delete the stale local database file and
-    // let it get recreated fresh. Fail loudly with that instruction instead
-    // of leaving whoever hits this to reverse-engineer it from a raw SQLite
-    // error, the way this exact failure had to be diagnosed once already.
-    const message =
-      `Failed to initialize the database at "${DB_PATH}".\n\n` +
-      `This almost always means that file was created by an OLDER version of ` +
-      `db/schema.sql and is missing a column, table, or index the current ` +
-      `schema expects — this demo has no real migration system, so schema ` +
-      `changes never retroactively alter an existing database file.\n\n` +
-      `Fix: stop the server, delete the stale database file(s), then restart ` +
-      `so it gets recreated from the current schema:\n\n` +
-      `    rm -f "${DB_PATH}" "${DB_PATH}-wal" "${DB_PATH}-shm"\n\n` +
-      `Original error: ${err instanceof Error ? err.message : String(err)}`;
-    throw new Error(message);
+export function d1Adapter(d1: D1Like): Db {
+  const prep = (sql: string, params: SqlParam[] = []) => d1.prepare(sql).bind(...params);
+  return {
+    async all<T>(sql: string, params?: SqlParam[]) {
+      const res = await prep(sql, params).all();
+      return (res.results ?? []) as T[];
+    },
+    async first<T>(sql: string, params?: SqlParam[]) {
+      return ((await prep(sql, params).first()) ?? null) as T | null;
+    },
+    async run(sql: string, params?: SqlParam[]) {
+      const res = await prep(sql, params).run();
+      return { changes: res.meta?.changes ?? 0 };
+    },
+    async batch(statements: Statement[]) {
+      const res = await d1.batch(statements.map((s) => prep(s.sql, s.params)));
+      return res.map((r) => ({ changes: r.meta?.changes ?? 0 }));
+    },
+  };
+}
+
+let override: Db | null = null;
+
+/** Tests / local scripts only: use this Db instead of the Cloudflare binding. */
+export function setDb(db: Db | null): void {
+  override = db;
+}
+
+export async function getDb(): Promise<Db> {
+  if (override) return override;
+  const { getCloudflareContext } = await import('@opennextjs/cloudflare');
+  const { env } = await getCloudflareContext({ async: true });
+  const binding = (env as unknown as { DB?: D1Like }).DB;
+  if (!binding) {
+    throw new Error(
+      'The D1 database binding "DB" is missing. Check the [[d1_databases]] block in wrangler.toml ' +
+        '(binding = "DB") and that the database has been created and migrated.'
+    );
   }
-
-  return db;
+  return d1Adapter(binding);
 }
 
-// Reuse a single connection across hot-reloads in dev.
-export const db = global.__db ?? createConnection();
-if (process.env.NODE_ENV !== 'production') global.__db = db;
+/** Current time in the same ISO format the schema uses for defaults. */
+export const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";

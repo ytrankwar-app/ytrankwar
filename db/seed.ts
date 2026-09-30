@@ -15,37 +15,47 @@ const DEMO_CHANNELS: { handle: string; category: string; country: string; bids: 
   { handle: '@dailygrindfit', category: 'sports', country: 'CA', bids: [] }, // free listing only, no paid bid
 ];
 
+// Local demo data for `npm run db:seed`. Seeds a LOCAL SQLite file
+// (SQLITE_PATH, default ./data/app.db) — it never touches production D1.
+// To seed the local Wrangler D1 instead, run the app with `npm run dev`
+// and add channels through the UI.
 async function main() {
-  console.log('Seeding DEMO data (never use in production)...');
+  const { loadLocalEnv } = await import('../scripts/load-env');
+  loadLocalEnv();
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { createSqliteDb } = await import('./sqlite-adapter');
+  const { setDb } = await import('./index');
 
-  const { db } = await import('./index');
+  const file = process.env.SQLITE_PATH || './data/app.db';
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const db = createSqliteDb(file);
+  setDb(db);
+
+  console.log(`Seeding DEMO data into ${file} (never use in production)...`);
 
   for (const spec of DEMO_CHANNELS) {
-    // No login in this app — submitChannel just auto-generates a
-    // referral_code. There is no manage_token or any other credential to
-    // hold onto.
-    const { channelId } = await submitChannel({
-      rawUrl: spec.handle,
-      category: spec.category,
-      country: spec.country,
-    });
+    const { channelId } = await submitChannel({ rawUrl: spec.handle, category: spec.category, country: spec.country });
 
     if (spec.bids.length > 0) {
-      mockVerifyChannel(channelId);
+      await mockVerifyChannel(channelId);
       for (const amountCents of spec.bids) {
-        const { paymentId } = createPayment({ channelId, amountCents });
-        confirmPayment(paymentId, { success: true, providerRef: 'seed_demo' });
+        const { paymentId } = await createPayment({ channelId, amountCents, provider: 'seed_demo' });
+        await confirmPayment(paymentId, { success: true, providerRef: 'seed_demo' });
       }
     }
 
     if (spec.referredVisits) {
-      db.prepare('UPDATE channels SET referred_visits = ? WHERE id = ?').run(spec.referredVisits, channelId);
+      await db.run('UPDATE channels SET referred_visits = ? WHERE id = ?', [spec.referredVisits, channelId]);
     }
-
     console.log(`  seeded ${spec.handle} (${spec.bids.length} bid(s) applied)`);
   }
 
+  db.close();
   console.log('Done. This is demo data only — clear it before production.');
 }
 
-main().then(() => process.exit(0));
+main().catch((e) => {
+  console.error(e);
+  process.exitCode = 1;
+});

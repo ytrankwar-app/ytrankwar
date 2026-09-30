@@ -1,8 +1,10 @@
-node_modules/
-.next/
-data/
-*.db
-*.db-shm
-*.db-wal
+node_modules
+.next
+.open-next
+.wrangler
+.dev.vars
 .env
 .env.local
+*.tsbuildinfo
+data
+next-env.d.ts

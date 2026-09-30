@@ -1,558 +1,179 @@
-# ytrankwar — YouTube Channel Rank War (working prototype)
+# ytrankwar
 
-A working implementation of the core mechanic from the spec: creators submit
-a YouTube channel for free, verify ownership, and place paid bids to compete
-for position on a public leaderboard — ranked purely by cumulative bid, never
-by subscribers or views.
+The YouTube channel rank war: list a channel for free, then pay to climb the leaderboard. Ranked purely by
+total paid bid.
 
-## What's real vs. mocked
+**Stack:** Next.js 14 (App Router) on **Cloudflare Workers** via [OpenNext](https://opennext.js.org/cloudflare),
+**Cloudflare D1** (SQLite) for data, **Dodo Payments** for checkout. Contact / support email:
+`ytrankwar@gmail.com`.
 
-This is a genuine full-stack app you can run and click through end-to-end —
-not a static mockup. But building the *entire* spec (real Stripe billing,
-real YouTube Data API access, live Cloudflare D1/Workers deployment, OAuth,
-dozens of SEO landing pages, full admin moderation tooling) is weeks of work
-requiring real credentials and infrastructure this environment doesn't have.
-Given that, effort went into making the **hard part** — the bidding and
-ranking engine — fully real and tested, while integrations that need
-external accounts are cleanly mocked behind the same interface a real
-integration would use.
+There is **one code path** for everything. `npm run dev`, `npm run cf:preview` and production all read and write
+D1 through the same `db/` layer, so what works locally is what runs on the main domain.
 
-| Piece | Status |
-|---|---|
-| Bidding engine (`lib/bidding-service.ts`) | **Real.** Atomic, idempotent, race-safe. See tests. |
-| Ranking (`lib/leaderboard-service.ts`) | **Real.** Rank always derived live from bid totals, never trusted from a cache. |
-| Database schema (`db/schema.sql`) | **Real.** SQLite, directly D1-compatible. |
-| Channel submission & profile pages | **Real.** SEO metadata, bid/rank history, category tabs. |
-| Public homepage only — no admin panel or dashboard | **Intentional.** Verification and bid management happen on the channel's own profile page instead. |
-| YouTube Data API (`lib/youtube.ts`) | **Real, opt-in.** Set `YOUTUBE_API_KEY` and channel name, logo, subscriber/view/video counts, and creation date come from the real `channels.list`/`search.list` endpoints. Without a key, falls back to deterministic mock data automatically so the app still works out of the box. Parsing/fallback/error-handling logic is covered by tests with a mocked `fetch` (`test/youtube-real-api.test.ts`) — a live call was not possible to test from this environment (no network egress to googleapis.com here), so test it with your own key before relying on it. |
-| Payments (`app/api/payments/*`) | **Mocked.** A "Simulate payment" button stands in for Stripe Checkout; the webhook handler is written exactly like a real Stripe webhook (idempotent, re-validates server-side) so swapping in real Stripe is additive, not a rewrite. |
-| No login, no accounts, no admin panel | **Real, by design.** There is no sign-in and no credential of any kind anywhere in this app. Anyone can add a channel, submit verification proof for any channel, and bid on any verified channel — the API enforces nothing about who's asking. See "No login" below. |
-| Ownership verification (`lib/verification-service.ts`) | **Real flow, mocked check.** Owner shares a generated public link on their channel's YouTube Community tab and submits the post URL back — this is genuinely Method B from the spec, not a placeholder button. What's mocked: without YouTube API access, the server checks the URL is *structurally* a plausible community-post link rather than fetching and confirming the link actually appears in the post. See the section below. |
-| Referral leaderboard (`getReferralLeaderboard` in `lib/leaderboard-service.ts`) | **Real, and deliberately separate.** Visits via a channel's shared `/r/{code}` link feed a second, clearly-labeled scoreboard. This never touches or influences `total_bid_cents` or paid rank — the spec is explicit that paid rank reflects verified bid only. |
-| Cloudflare D1 schema & BidCoordinator Durable Object | **Real, independently verified.** The D1 migration and the money-critical bid-confirmation Durable Object both actually run and were tested against a real local Cloudflare Workers + D1 + Durable Objects runtime — see "Cloudflare D1 + Durable Objects" below. |
-| Cloudflare hosting for the app itself | **Not done.** The Next.js app still runs on Node against `better-sqlite3`, not on Workers against D1 — see the same section for exactly what's left. |
+> Product behaviour (bidding economics, ranking, referrals, verification, YouTube data) is documented in
+> [docs/PRODUCT_NOTES.md](docs/PRODUCT_NOTES.md).
 
-## Bidding economics
+---
 
-- First paid position: **$25 minimum** (`min_bid_cents` in `settings`, default 2500).
-- Taking an already-ranked position: the holder's **current total bid + $1**
-  (`min_increment_cents` in `settings`, default 100) — not a single cent.
-  Both numbers are configurable via the `settings` table without touching
-  code. Locked in by a dedicated test:
-  `test/bidding.test.ts` → "spec requirement: first paid position costs $25,
-  taking an already-ranked position costs +$1 over its current value".
+## Pages
 
-## Every channel is ranked — free and paid alike
+| Route | What it is |
+| --- | --- |
+| `/` | Leaderboard |
+| `/channel/[slug]` | Channel profile, bid history, verification, referral link |
+| `/rules` | Rules (how bids, ranks, ties, verification, referrals and payments work) |
+| `/policy` | One page with Privacy, Cookies, Terms, Payments & refunds, Content policy, Disclaimer, Contact |
+| `/payment/return` | Where Dodo sends the customer back; shows the payment status |
+| `/robots.txt`, `/sitemap.xml` | Generated per request from the domain being served; the sitemap lists every approved channel |
+| 404 / 500 | `app/not-found.tsx`, `app/error.tsx`, and `app/global-error.tsx` (last-resort boundary) |
 
-Every submitted channel appears on the leaderboard with a real rank, not
-just ones that have taken a paid position. Ranking order is:
+---
 
-1. **Highest cumulative bid wins**, as always.
-2. **First-come-first-served among ties** — most visibly, every channel
-   that has never placed a bid sits at $0 and would otherwise tie with
-   every other free channel; whichever was *added* earlier keeps the
-   better spot among them. (Paid ties are still broken by whichever
-   payment was *confirmed* first, via the `seq` counter described below —
-   `created_at` is only reached as a third tiebreak when `seq` itself ties,
-   which only happens for channels that have never bid at all.)
+## Local development
 
-`getLeaderboard()` and `getChannelRank()` share one ordering rule
-(`total_bid_cents DESC, seq ASC, created_at ASC`) so a channel's own
-profile page and its position on the homepage can never disagree. Verified
-with dedicated tests in `test/leaderboard.test.ts`, including a live
-end-to-end check: two free channels plus one paid channel produce exactly
-paid-first, then free-in-creation-order.
-
-Each leaderboard entry also carries `requiredToClaimCents` — the exact
-price to overtake that specific row right now ($25 if it's still free,
-current total + $1 otherwise) — computed once server-side
-(`computeClaimPrice` in `lib/leaderboard-service.ts`) so the homepage's
-"claim this rank for $X" links and the actual payment quote can never drift
-apart the way they briefly did before (see the bug note further down).
-
-## No header — just a slim live-stats bar at the top
-
-There is no branded nav bar, logo, or "My channels" menu anywhere in this
-app anymore (`components/NavBar.tsx` is deleted). In its place,
-`components/TopBar.tsx` renders only the live visitor/channel counters
-(the same `StatsBar` component from before), pinned to the top of every
-page via `position: sticky` so they stay visible while scrolling. The
-homepage no longer renders a second copy of these counters inline in the
-hero — they exist in exactly one place now, avoiding duplicate presence
-pings.
-
-## Homepage leaderboard: real stats, clickable rows, Top N segments
-
-Each row now shows the channel's real (or, without a `YOUTUBE_API_KEY`,
-mock-but-consistent) subscriber count, the real click-through count tracked
-via `/api/channels/{id}/click`, and how long ago its bid last changed (or
-since it was added, if it's still free) — not just name and rank. The
-entire row is a clickable/keyboard-focusable link straight to the channel's
-own profile page (`role="link"`, `Enter`/`Space` activation); the "Visit"
-button and the "claim this rank" link both stop event propagation so they
-don't also trigger the row's navigation. A **Top 10 / Top 20 / Top 50**
-control sits alongside the category tabs, simply setting the existing
-`limit` query param.
-
-## Referral link: public, visible to everyone
-
-There is no login or ownership credential in this app (see "No login"
-below), so there's no "owner-only" view to gate this behind. An earlier
-revision hid the "share this channel" panel unless the visiting browser held
-that channel's `manage_token`; now that the token model has been removed
-entirely, `components/ReferralSection.tsx` always renders the panel — the
-`referral_code`/link was always meant to be shared publicly anyway.
-
-## No login: fully open, by design
-
-There is no sign-in, no password, no session, and no per-channel credential
-anywhere in this app. Submitting a channel (`POST /api/channels`) just
-generates a public `referralCode` (safe to share, builds the `/r/{code}`
-link described below) — nothing secret is returned or stored.
-
-- **Anyone can bid on any verified channel.** `POST /api/payments/create`
-  and `createPayment()` (`lib/bidding-service.ts`) take only a `channelId`;
-  the only gate is the channel's own state (verified, not
-  suspended/removed) — never who's asking.
-- **Anyone can submit ownership-verification proof for any channel.**
-  `POST /api/channels/{id}/verify` has no auth check either. The proof
-  itself is the real gate: only the actual channel owner can post to that
-  channel's own YouTube Community tab, so a valid post URL is
-  self-authenticating (see "Ownership verification" below).
-- **"My channels" (`lib/local-channels.ts`) is a client-side convenience
-  only**, not a credential. It's a `localStorage` list of channels this
-  browser has visited or added, used purely so pickers (e.g. "which of your
-  channels do you want to bid up?" in `ClaimRankModal.tsx`) can offer a
-  shortlist instead of making you look up a channel by slug every time.
-  Clearing it, or opening the site on a different device, loses only that
-  shortcut — never any access, since there was never any access to lose.
-
-A `users` table still exists in the schema purely so `bids`/`payments` rows
-have a stable id to reference for audit continuity — a synthetic row is
-auto-created per channel at submission time (`lib/channel-service.ts`) and
-is never used for authorization.
-
-**Trade-off, stated plainly:** with no ownership check, anyone can pay to
-raise any channel's total (not just its original submitter's) — functionally
-closer to "sponsor any channel you like" than "defend your own channel from
-rivals." That's an intentional consequence of removing login entirely, not
-an oversight; see the "Coming from here" section at the bottom for what
-adding real per-channel ownership back would require.
-
-## Referral traffic: the /r/{code} link and its leaderboard
-
-The same public link a channel shares to prove ownership also drives
-referred traffic, adapted from the "get my link → copy → post" growth loop
-on sites like xme.lol (built for X/Twitter) — here posted to YouTube
-Community instead:
-
-- `GET /r/{code}` (`app/r/[code]/route.ts`) is a public, unauthenticated
-  redirect: it increments that channel's `referred_visits` counter, then
-  sends the visitor on to the channel's profile page.
-- `getReferralLeaderboard()` ranks channels by `referred_visits` and is
-  surfaced as its own section on the homepage
-  (`components/ReferralLeaderboard.tsx`), clearly separate from — and never
-  mixed into — the paid leaderboard above it.
-- This was a deliberate product decision, not a default: paid bidding stays
-  the primary ranking mechanic; referred traffic earns a separate scoreboard
-  and bragging rights, never a paid-rank boost.
-
-## Ownership verification: post to YouTube Community
-
-This is now the same link described in "No login" and "Referral traffic"
-above — one link serves two purposes (ownership proof and referral
-tracking), which is worth restating concretely as a single flow:
-
-1. A unique public code (`YTW-XXXXXXXX`) is generated per channel at
-   submission time (`channels.referral_code`) — this is the code embedded
-   in `/r/{code}`.
-2. The channel's profile page shows suggested post text containing that
-   link, a **Copy** button, and a deep link that opens the channel's own
-   YouTube Community tab in a new tab. YouTube has no public "compose
-   intent" URL like X's `intent/tweet?text=...`, so this is copy-paste
-   rather than one click.
-3. The owner posts the copied text there, then pastes the post's URL back
-   into the verification form — anyone can open this form for any channel
-   (there is no login), but only the real owner can produce a URL that
-   actually points at a post on that channel's own Community tab, which is
-   what the next step checks.
-4. The server (`lib/verification-service.ts`) validates the URL is
-   plausibly a YouTube community-post link for that channel and records it
-   in `channel_ownership_tokens` as an audit trail, then marks the channel
-   verified.
-
-**What's real vs. mocked here specifically:** the code generation, the UI
-flow, the audit record, and the gate that blocks unverified channels from
-bidding are all real and enforced server-side (verified with live requests:
-an unverified channel is rejected from `/api/payments/create`, a
-non-YouTube URL is rejected from the verify endpoint, a plausible one
-succeeds). What's mocked is the actual content check — YouTube doesn't
-expose a public API for reading Community posts, so this doesn't fetch the
-post and confirm the link is really there. A production version would need
-a server-side fetch of the public community-tab page (or Data API access,
-if/when YouTube exposes one for this) to close that gap. The "Add & Take a
-Position" premium flow still exists as a separate instant-verify shortcut
-for users who'd rather skip this step entirely.
-
-## Getting real channel data (logo, subscribers, views, videos)
-
-By default (no `YOUTUBE_API_KEY` set), channel data is deterministic mock
-data — the same handle always produces the same fake avatar/numbers, which
-is why a freshly-added channel's logo, subscriber count, etc. won't match
-the real channel. To get real data:
-
-1. In [Google Cloud Console](https://console.cloud.google.com), create or
-   select a project, enable **YouTube Data API v3**, then create an API key
-   under Credentials.
-2. Set `YOUTUBE_API_KEY=your-key` in `.env.local` (or your deployment's env
-   vars) and restart the dev server.
-3. Run `npm run check:youtube-key` to verify the key actually works before
-   testing in the app — it reads `.env.local` directly and calls the real
-   API itself, printing a specific diagnosis (quota exceeded, API not
-   enabled, key restricted to HTTP referrers — which never works for
-   server-side calls like this, invalid key, etc.) rather than a generic
-   failure. **Never paste your actual key into a chat conversation or
-   commit it** — this script exists specifically so you never have to share
-   it with anyone to debug it.
-4. New channel submissions will now fetch the real name, logo, description,
-   subscriber/view/video counts, and creation date via `channels.list` (or
-   `search.list` as a fallback for custom URLs that don't resolve directly
-   — see `lib/youtube.ts`).
-5. **Channels added before the key was set/working keep their old mock
-   data forever otherwise** — the lookup only happens once, at submission
-   time, nothing re-fetches it later. Run `npm run db:refresh-stats` to
-   re-fetch real data for every existing channel and update it in place
-   (name, handle, avatar, description, subscriber/view/video counts). Bids,
-   verification status, and the manage/referral tokens are left untouched.
-   The core logic (`scripts/refresh-channel-stats.ts` →
-   `refreshAllChannelStats`) is covered by
-   `test/refresh-channel-stats.test.ts` with a mocked API response,
-   confirming it genuinely replaces every mock field with the fetched one,
-   leaves bidding/ownership state alone, and stops early on a quota/key
-   error instead of burning through every remaining channel with the same
-   failure.
-
-**A separate, unrelated gap this surfaced:** channel *category* (Gaming,
-Music, etc.) was never settable from the UI at all — the backend fully
-supported it, but `AddChannelForm` never sent it, so every channel's
-category was silently `null` and never showed up under any category tab.
-This is now fixed with a category dropdown on the add-channel form
-(`lib/categories.ts` is the single shared list, used by both the form and
-the leaderboard's category tabs so they can't drift out of sync).
-
-I could not test the live YouTube API call from this environment (no
-network egress to `googleapis.com` here), so instead I wrote
-`test/youtube-real-api.test.ts`, which mocks `fetch` with realistic
-`channels.list`/`search.list` response shapes and verifies the parsing,
-the handle → id → custom-URL fallback chain, and every error path (quota
-exceeded, invalid key, not found, network failure) produces a clear
-message rather than a raw exception. That gives confidence the code is
-correct, but the final live test with your own key is still worth doing.
-
-## Node.js version note (Windows especially)
-
-`better-sqlite3` is pinned to **v13.x**. Earlier drafts of this project used
-v11.x, which does not ship a prebuilt native binary for Node 24 — on Windows
-in particular, that surfaced as every API route failing with `Error: Could
-not locate the bindings file` the moment it first touched the database
-(the dev server itself would start and say "Ready" fine, since the native
-module only loads on first use). v13 moved to N-API, which ships prebuilt
-binaries directly in the package for all major platforms/architectures
-without needing per-Node-version downloads — this should no longer happen
-on any currently supported Node version. If you ever see that error again
-after `npm install`, run `npm rebuild better-sqlite3` first before assuming
-anything else is wrong.
-
-## Icons, branding, and crawler/LLM compatibility
-
-- Favicons, apple-touch-icon, and the web app manifest live in `public/` and
-  are linked from `app/layout.tsx`; the manifest's theme/background colors
-  match the site's dark palette rather than the generator's defaults.
-- `/llms.txt` (in `public/`) follows the [llmstxt.org](https://llmstxt.org)
-  convention — a plain-language summary of what the site is, how bidding
-  works, which API endpoints are safe to call read-only, and which mutate
-  state and require a real user's intent.
-- `app/robots.ts` and `app/sitemap.ts` are Next.js metadata routes that
-  generate `/robots.txt` and `/sitemap.xml`. The sitemap is marked
-  `force-dynamic` deliberately — an early version used the default static
-  rendering and silently froze the channel list at build time, so newly
-  added channels would never have appeared in it.
-- Both the homepage and each channel profile page emit JSON-LD structured
-  data (`Organization`/`WebSite` and `ProfilePage`/`Brand` respectively) so
-  search engines and LLM crawlers get machine-readable context, not just
-  prose.
-
-While wiring this in, two pre-existing bugs surfaced and got fixed:
-`getChannelBySlug` used `SELECT c.*`, which returns snake_case columns
-(`category_slug`, `created_at`, ...) while the page read camelCase
-(`categorySlug`) — so a channel's category silently always rendered as "—".
-And the profile page's "Visit YouTube" button linked to
-`youtube.com/channel/{internal-db-id}` instead of the real handle/YouTube
-channel id, so it never actually pointed at the right channel. Both are
-fixed and covered by the smoke tests in this session's history.
-
-## Homepage features added since the first pass
-
-- **Live visitor count** — a pulsing "N online now" pill. Each browser tab
-  gets an anonymous session id (sessionStorage) and pings
-  `/api/presence/ping` every 20s; `/api/stats` counts sessions seen in the
-  last 60 seconds. This is a single-instance SQL-table approximation of
-  presence, not real-time infra — fine for a demo, but a production
-  deployment at real scale would want Durable Objects or a KV counter
-  instead (noted in `db/schema.sql`).
-- **Total channels added count** — a simple `count(*)` on `channels`,
-  served from the same `/api/stats` endpoint.
-- **"Add & Take a Position"** — a second, gold-styled button next to the
-  free "Add Channel" button. Listing is free either way; this path just
-  auto-verifies the channel (demo-only shortcut — see
-  `app/api/channels/route.ts`) and redirects straight into the bid modal so
-  a creator can go from "never listed" to "bidding for a rank" in one flow,
-  instead of add → find profile page → click verify → click bid.
-
-## A bug worth knowing about (fixed, but instructive)
-
-`requiredTotalForRank()` originally returned `0 + $1 increment` for an empty
-rank slot (e.g. an empty leaderboard's #1), which meant the homepage's
-"Claim #1" card briefly displayed **$1.00** as the price to take the top
-spot instead of the real **$25.00** minimum — a display-only bug (the actual
-payment path already enforced the $25 floor via `quoteAdditionalForTarget`),
-but a misleading one on the site's most prominent button. Fixed to return
-`minBidCents()` for any empty rank, with a dedicated regression test
-(`test/bidding.test.ts` → "required total for an empty rank is the real $25
-minimum, not $0 or $1") and a new `GET /api/bids/next-price?rank=N` endpoint
-so display-only UI never has to duplicate this logic itself.
-
-## Why the bidding engine is the priority
-
-This is the one piece where getting it wrong loses real money or produces an
-unfair leaderboard, so it got the most attention:
-
-- **Money is stored as integer cents everywhere** — no floating point.
-- **`bids` is an append-only ledger.** `listings.total_bid_cents` is a cache
-  that must always equal `SUM(bids.amount_added_cents)` for that channel —
-  never written from anywhere except `confirmPayment`.
-- **Rank is always derived live** from `total_bid_cents`, ordered by amount
-  then by a strictly-increasing `seq` counter (not wall-clock time, which can
-  tie at millisecond resolution during a real race — this was caught by the
-  test suite, see below).
-- **`confirmPayment` is the only place a bid is ever applied**, and it's
-  atomic + idempotent: a duplicated webhook delivery (which Stripe explicitly
-  says can happen) is a safe no-op, verified by a test.
-- **Nothing about price or rank is trusted from the client.** The quote shown
-  before checkout is advisory; the real total is re-read from the database
-  inside the transaction at confirmation time.
-- **There is no ownership check on bidding at all.** Any verified channel
-  can be bid on by anyone — the server never checks who's asking, only that
-  the target channel itself is verified and not suspended/removed
-  (`assertChannelEligible` in `lib/bidding-service.ts`). See "No login"
-  above for what that trades away.
-
-Run `npm test` to see this exercised directly, including a simulated race
-where two bidders check out against the same stale "current #1" price at
-once.
-
-## Troubleshooting
-
-**Getting a 500 on API routes after pulling a newer version of this project?**
-This demo has no real migration system — `db/schema.sql` uses
-`CREATE TABLE IF NOT EXISTS` everywhere, so if you already had a
-`data/app.db` file from an older version, re-applying a newer schema over it
-does nothing to add columns/tables that version didn't have yet. `db/index.ts`
-now fails loudly with a clear message and the exact fix when this happens,
-but the short version is:
-
-```bash
-rm -f data/app.db data/app.db-wal data/app.db-shm
-```
-
-Then restart. This is a local data-file problem, not a sign that the
-frontend+backend-in-one-app architecture is broken — a separate backend
-using the same SQLite file would hit the identical error, since the cause is
-schema drift, not process layout.
-
-## Running it locally
+Requires **Node 22.5+** (unit tests use the built-in `node:sqlite`).
 
 ```bash
 npm install
-npm run db:seed   # optional: adds demo channels/bids, clearly marked as fake
-npm run dev        # http://localhost:3000
+cp .dev.vars.example .dev.vars      # local config; never commit it
+npm run dev                         # http://localhost:3000
 ```
 
-There is no sign-in. Paste a channel link on the homepage, then verify it
-from its profile page by posting the generated link to your channel's
-YouTube Community tab and pasting the post URL back (see "Ownership
-verification" above) — or use the gold **Add & Take a Position** button on
-the homepage instead, which auto-verifies and skips straight to bidding.
-Either way, once verified:
+`npm run dev` first applies any pending D1 migrations to the local database (Wrangler may ask "Ok to proceed?" —
+answer `Y`), then starts Next.js. If you ever see `no such table: ...` errors, the local database is missing its
+tables: run `npm run d1:migrate:local`, or `npm run d1:reset:local` to wipe the local data and start clean.
 
-- hit **Claim #1** at the top of the homepage to bid one of your channels
-  into the top spot, or
-- hit **Outbid** on any row to bid one of your channels above that specific
-  one.
+`next dev` is wired to the Cloudflare bindings (see `next.config.mjs`), so it uses a local D1 emulated by
+Wrangler.
 
-Either way you'll pick which of your own verified channels to use, see a
-quote, then simulate the payment (a "Simulate payment" button stands in for
-Stripe Checkout).
+**Payments locally.** With no Dodo credentials in `.dev.vars`, "Confirm & Pay" uses a built-in simulator
+(`/api/dev/complete-payment`) that completes the payment without a charge. It only exists under `next dev`; in a
+production build it returns 404 and payments return a clean "unavailable" error instead. To test real Dodo
+checkout locally, put your **test-mode** keys in `.dev.vars` and expose the site with a tunnel so Dodo can reach
+the webhook (e.g. `cloudflared tunnel --url http://localhost:3000`).
 
-Only the public homepage and channel profile pages exist — there is no
-admin panel or user dashboard in this build; channel verification and
-bid management both live on the channel's own profile page.
-
-`npm run build && npm start` runs the production Next.js build.
-`npm test` runs the bidding/ranking/validation/ownership test suite (`node:test` via `tsx`).
-
-## Cloudflare D1 + Durable Objects: what's built, and what's proven
-
-This section documents real, working infrastructure — not a sketch. It was
-built and verified against a real local Cloudflare Workers + D1 + Durable
-Objects runtime (via Wrangler's local emulation, which needs no Cloudflare
-account or network access), not just written to match documentation.
-
-### The database schema (done)
-
-`migrations/0001_initial.sql` is the exact same schema as `db/schema.sql`,
-adapted for D1's migration format (D1 enables foreign keys by default, so
-the `PRAGMA foreign_keys = ON` line is removed — D1 migration files don't
-use PRAGMA statements). Verified by actually running
-`wrangler d1 migrations apply --local` against it: all 33 statements
-executed successfully and created all 17 tables. Apply it to a real
-database with:
+Other commands:
 
 ```bash
-wrangler d1 create ytrankwar-db   # prints a database_id — put it in wrangler.toml
-npm run d1:migrate:local           # or d1:migrate:remote for the real thing
+npm test                # unit tests (in-memory SQLite built from the real migrations)
+npm run typecheck
+npm run db:seed         # OPTIONAL demo data into a local SQLite file (never production)
+npm run cf:preview      # build for Workers and run it locally exactly as production would
 ```
 
-### The bidding engine's money-critical path (done — and here's why it needed a redesign, not just a driver swap)
+---
 
-**Cloudflare D1 has no interactive SQL transactions** (no `BEGIN`/`COMMIT`
-spanning a JS read, then a computed write). It only offers `.batch()` — a
-*pre-built array* of statements, which can't branch on a value read moments
-earlier. The existing `confirmPayment` (in `lib/bidding-service.ts`) does
-exactly that: read the current total, compute a new one, write it, wrapped
-in `better-sqlite3`'s synchronous transaction — the core protection against
-two concurrent payments corrupting each other. That pattern has no direct
-D1 equivalent.
+## Deploy to Cloudflare (main domain)
 
-The natural next idea — "run it inside a Durable Object, since a DO handles
-one request at a time" — is a real fix, but only if done correctly.
-**A Durable Object's automatic serialization ("input gate") only protects
-its own `ctx.storage` calls. Awaiting external I/O — including a D1
-query — releases that gate**, letting a second concurrent call interleave
-its own read before the first call's write completes. A naive
-`async confirmPayment()` inside a DO that queries D1 would silently
-reintroduce the identical race condition, just relocated. This is
-documented Cloudflare behavior, but rather than trust that and move on, it
-was verified empirically:
+Do these once.
 
+1. **Create the database**
+   ```bash
+   npx wrangler login
+   npx wrangler d1 create ytrankwar-db
+   ```
+   Paste the printed `database_id` into `wrangler.toml` (`[[d1_databases]]`).
+
+2. **Set the site URL** in `wrangler.toml` `[vars]`: `SITE_URL = "https://yourdomain.com"` (https, no trailing
+   slash). Also set `DODO_PRODUCT_ID` (step 3).
+
+3. **Dodo Payments** (dashboard: <https://app.dodopayments.com>)
+   - Create ONE **one-time product** with **Pay What You Want** pricing (USD, minimum $1, maximum ≥ $10,000).
+     Bids are variable, so the site sends the exact amount at checkout. Put its id in `DODO_PRODUCT_ID`.
+   - **Developer → API Keys**: create a key, then `npx wrangler secret put DODO_PAYMENTS_API_KEY`.
+   - **Developer → Webhooks**: add endpoint `https://yourdomain.com/api/payments/webhook` and subscribe to
+     `payment.succeeded`, `payment.failed`, `refund.succeeded`, `dispute.opened`, `dispute.lost`. Copy the signing
+     secret, then `npx wrangler secret put DODO_PAYMENTS_WEBHOOK_KEY`.
+   - Test first with `DODO_PAYMENTS_ENVIRONMENT = "test_mode"` (and test-mode key/product/webhook). When ready,
+     create the live equivalents and switch to `"live_mode"`.
+
+4. **YouTube key (optional but recommended)**: `npx wrangler secret put YOUTUBE_API_KEY`. Without it channel data
+   is mock data.
+
+5. **Deploy**
+   ```bash
+   npm run deploy      # applies D1 migrations to the remote DB, builds, deploys
+   ```
+
+6. **Attach your domain**: the domain's DNS must be on Cloudflare. Uncomment the `[[routes]]` blocks in
+   `wrangler.toml` (`custom_domain = true`) and `npm run deploy` again (or Workers & Pages → ytrankwar →
+   Settings → Domains & Routes).
+
+7. **Submit** `https://yourdomain.com/sitemap.xml` in Google Search Console.
+
+Every later release is just `npm run deploy`. Migrations are applied in order and only once.
+
+### Configuration reference
+
+| Name | Where | Purpose |
+| --- | --- | --- |
+| `SITE_URL` | `wrangler.toml` `[vars]` | Canonical base URL (falls back to the request host if unset) |
+| `DODO_PAYMENTS_ENVIRONMENT` | `[vars]` | `test_mode` or `live_mode` |
+| `DODO_PRODUCT_ID` | `[vars]` | The Pay-What-You-Want product used for every bid |
+| `DODO_PAYMENTS_API_KEY` | secret | Creates checkout sessions |
+| `DODO_PAYMENTS_WEBHOOK_KEY` | secret | Verifies webhook signatures |
+| `YOUTUBE_API_KEY` | secret | Real channel data |
+
+---
+
+## How payments work
+
+1. The browser asks `POST /api/payments/create` to bid for a rank. The server recomputes the price itself (never
+   trusts the browser), records a `payments` row, creates a Dodo hosted checkout for that exact amount and returns
+   its URL.
+2. The customer pays on Dodo's page and is returned to `/payment/return`.
+3. The bid is applied by the **signed webhook** (`payment.succeeded`). If the customer lands on the return page
+   first, the page asks Dodo directly (server-to-server) and applies the payment itself. Both paths are safe to
+   run together.
+4. `confirmPayment` (`lib/bidding-service.ts`) is atomic and idempotent. D1 has no interactive transactions, so
+   it is one `batch()` of conditional SQL statements; the first confirmation applies the bid and every duplicate
+   finds the payment already `paid` and changes nothing. `bids.payment_id` is also `UNIQUE` as a backstop. If a
+   channel was suspended while the customer was at checkout, the money is **not** credited and the payment is
+   marked `NEEDS REFUND` in its `note`.
+5. Refund and dispute webhooks only *flag* the payment (`refunded` / `disputed`). Whether to reduce a bid is a
+   human decision.
+
+To see payments that need attention:
 ```bash
-sh workers/verify-concurrency-proof.sh
+npx wrangler d1 execute ytrankwar-db --remote --command \
+  "SELECT id, channel_id, amount_cents, status, note FROM payments WHERE note LIKE 'NEEDS REFUND%' OR status IN ('refunded','disputed','pending')"
 ```
 
-This script (fully automated, no account/network needed) spins up a real
-local Durable Object + D1 pair via `wrangler dev`, fires 10 truly
-concurrent increments at a naive version, and at a version wrapped in
-`blockConcurrencyWhile()`. Result: **the naive version loses 9 of 10
-updates** (final value: 1, not 10) — proving the race is real, not
-hypothetical — **and the protected version loses none** (final value:
-exactly 10). `workers/race-proof.mjs` is the toy worker used for this;
-`workers/bid-coordinator.ts` is the real one, built on the same proven
-pattern.
+---
 
-**`workers/bid-coordinator.ts`** is a `BidCoordinator` Durable Object, one
-instance per channel (`env.BID_COORDINATOR.idFromName(channelId)`), whose
-`confirmPayment()` method mirrors `lib/bidding-service.ts`'s logic exactly
-— idempotency check, re-validate the channel's eligibility, read the
-current total, compute the new one, write via `db.batch()` — all inside
-`blockConcurrencyWhile()`. Business-logic rejections (unverified channel,
-suspended, etc.) are caught *inside* that callback and returned as a normal
-result; only a genuinely unexpected error is allowed to propagate out
-(which intentionally tears down and resets that Durable Object instance —
-correct for a real failure, far too destructive for an expected rejection).
-Different channels get different DO instances, so one channel's bid
-processing never blocks another's.
+## Production checklist
 
-This was tested against the *actual* logic, not a toy example: a real
-verified channel, two real pending payments ($50.00 and $30.00), confirmed
-at the exact same instant. Result: both applied correctly, final total
-exactly $80.00 (`5000 + 3000` cents), `bid_count = 2`, both bid ledger rows
-present — no money lost. A duplicate confirmation of an already-paid
-payment correctly returned `applied: false` without re-adding another
-$50.00. Global, cross-channel bookkeeping (rank cache rebuild, rank
-history) deliberately stays *outside* this DO — it's cache-only,
-eventually-consistent by design, and touches every channel, so it has no
-business being serialized behind any single channel's coordinator.
+- [ ] `database_id`, `SITE_URL`, `DODO_PRODUCT_ID` set in `wrangler.toml`
+- [ ] Secrets set: `DODO_PAYMENTS_API_KEY`, `DODO_PAYMENTS_WEBHOOK_KEY`, `YOUTUBE_API_KEY`
+- [ ] Dodo webhook endpoint added and receiving events (Dodo dashboard shows delivery status)
+- [ ] Did a full test-mode payment end to end, then switched to `live_mode` with live credentials
+- [ ] Custom domain attached; `https://yourdomain.com/robots.txt` and `/sitemap.xml` show your domain
+- [ ] Add a Cloudflare **rate limiting rule** for `/api/*` (Security → WAF → Rate limiting), e.g. 60 requests /
+      minute per IP. The app validates all input but does not rate limit by itself.
+- [ ] Read `/rules` and `/policy` and confirm they match how you actually want to run the business (see below)
+- [ ] No demo data in the production DB (`db:seed` only ever writes a local file)
 
-Durable Objects require at least the **Workers Paid plan ($5/mo)** — worth
-knowing before committing to this architecture.
+## Things to review (business decisions baked into the copy)
 
-`workers/tsconfig.json` type-checks this code separately from the Next.js
-app (`npm run workers:typecheck`), because Workers-runtime types
-(`D1Database`, `DurableObject`, etc.) would collide with the DOM/Node types
-the rest of the app uses. `workers/bid-coordinator.ts` deliberately
-duplicates the tiny, dependency-free `BiddingError` class rather than
-importing it from `lib/bidding-service.ts` — that file's other imports
-(`@/db`) load `better-sqlite3`, a native Node addon that cannot run in the
-Workers runtime, and nothing here verifies a bundler would tree-shake that
-half away.
+- **Refunds:** `/rules` and `/policy` say all payments are final (modelled on xme.lol/rules), with an exception for
+  billing errors on our side. Change both pages if you want a different policy.
+- **Minimums:** the pages say $25 first bid and +$1 to outbid; these are the database defaults
+  (`settings.min_bid_cents`, `min_increment_cents`). If you change the settings, update `/rules`.
+- `/policy` is a sensible starting point, not legal advice. Have it reviewed for the countries you sell in.
 
-### What's NOT done yet — the app doesn't run on Cloudflare end-to-end
+## Scheduled work
 
-The pieces above are real and independently verified, but the Next.js app
-itself still runs on Node (`next start`) against a local `better-sqlite3`
-file, not against D1. Wiring them together is the remaining work:
+An hourly Cron Trigger (`worker.ts`) rebuilds the rank cache and refreshes the 40 least-recently-updated channels'
+YouTube stats (≈960 quota units/day of the free 10,000). YouTube is never called during a page request.
 
-1. **Hosting**: build with [OpenNext's Cloudflare
-   adapter](https://opennext.js.org/cloudflare) instead of `next start`, so
-   Next.js server code can reach `env.DB` and `env.BID_COORDINATOR` via
-   `getCloudflareContext()`.
-2. **The rest of the data layer**: every other function in `lib/*.ts`
-   (`leaderboard-service.ts`, `channel-service.ts`, `verification-service.ts`,
-   `settings.ts`, `presence-service.ts`) is still
-   synchronous `better-sqlite3` code and needs converting to async D1
-   queries. None of these have D1's transaction limitation as a concern —
-   they're ordinary reads and independent writes — so this is a more
-   mechanical (if large) conversion than the bidding engine was, but it
-   hasn't been done, and doing it while also preserving today's
-   zero-Cloudflare-account local dev experience (`npm run dev`, `npm test`)
-   is a real design question worth its own focused pass rather than rushing
-   both at once.
-3. **Wiring `app/api/payments/webhook/route.ts`** to call
-   `env.BID_COORDINATOR.idFromName(channelId).get().confirmPayment(...)`
-   instead of the local `confirmPayment()` — straightforward once (1) and
-   (2) exist.
-4. **YouTube**: the real `channels.list`/`search.list` integration already
-   exists (`lib/youtube.ts`, opt-in via `YOUTUBE_API_KEY`) — what's left for
-   production scale is moving `channel_stats` refresh to the Cron Trigger
-   already declared in `wrangler.toml`, so it's never called on a live page
-   view, and monitoring quota usage (a direct lookup costs 1 unit of the
-   10,000/day free tier; the custom-URL fallback search costs 100).
-5. **Payments**: replace `app/api/payments/create` with a real Stripe
-   Checkout Session creation call, and `app/api/payments/webhook` with
-   `stripe.webhooks.constructEvent` signature verification before calling
-   into the Durable Object.
-6. **Optional accounts, or ownership, on top of the open model**: this app
-   deliberately has no login and no per-channel ownership check at all (see
-   "No login" above) — anyone can bid on or verify any channel, and that can
-   stay true in production too. If real ownership/accounts are ever wanted
-   (so a channel can only be raised by whoever added it, or so someone can
-   see all their channels without local storage), the natural place to add
-   it is a credential or session check inside `assertChannelEligible`
-   (`lib/bidding-service.ts`) and the verify route
-   (`app/api/channels/[id]/verify/route.ts`) — both currently have no such
-   check by design. Google OAuth login can double as YouTube ownership
-   Method A if added.
-7. **Everything not built yet** per the original spec — country/category
-   SEO landing pages beyond the tabs already on the homepage, battle pages,
-   moderation queue UI, and email notifications — can be layered on top of
-   the existing schema and services without touching the bidding engine.
-   (Sitemap and robots generation are already built — see
-   `app/sitemap.ts` / `app/robots.ts`.)
+## Project layout
 
-## What's intentionally out of scope here
-
-Legal page copy, full moderation workflows, notification emails, and the
-dozens of SEO landing pages from the spec are not built — they're UI/content
-work that doesn't depend on the hard engineering problem this prototype
-focuses on, and are better written with real legal review and real brand
-copy rather than placeholder text.
+```
+app/            pages, error pages, API routes (payments/webhook, payments/create, ...)
+components/     UI
+db/index.ts     Db interface + D1 adapter (the only DB access point)
+db/sqlite-adapter.ts   Node-only adapter used by tests/seed (never imported by app code)
+lib/            bidding, leaderboard, channel, verification, Dodo client, site URL helpers
+migrations/     D1 migrations (0001 schema, 0002 Dodo payments)
+worker.ts       Worker entry: OpenNext app + Cron handler
+```

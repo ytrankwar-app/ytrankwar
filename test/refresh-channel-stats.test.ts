@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 
-process.env.SQLITE_PATH = path.join(process.cwd(), 'data', `test-refresh-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+const { setDb } = await import('../db/index');
+const { createSqliteDb } = await import('../db/sqlite-adapter');
+const db = createSqliteDb(':memory:');
+setDb(db);
 
-const { db } = await import('../db/index');
 const { newId } = await import('../lib/ids');
 const { newReferralCode } = await import('../lib/verification-service');
-const { refreshAllChannelStats } = await import('../scripts/refresh-channel-stats');
+const { refreshChannelStats } = await import('../lib/stats-refresh');
 
 const originalFetch = globalThis.fetch;
 const originalApiKey = process.env.YOUTUBE_API_KEY;
@@ -19,23 +19,22 @@ test.afterEach(() => {
   else process.env.YOUTUBE_API_KEY = originalApiKey;
 });
 
-function makeChannelWithOldMockData(name: string, youtubeChannelId: string) {
+async function makeChannelWithOldMockData(name: string, youtubeChannelId: string) {
   const id = newId('ch');
   const ownerUserId = newId('usr');
-  db.prepare('INSERT INTO users (id, name, email) VALUES (?, ?, ?)').run(ownerUserId, name, `${id}@owner.test`);
-  db.prepare(
+  await db.run('INSERT INTO users (id, name, email) VALUES (?, ?, ?)', [ownerUserId, name, `${id}@owner.test`]);
+  await db.run(
     `INSERT INTO channels (id, youtube_channel_id, slug, name, handle, avatar_url, description, owner_user_id, referral_code, verification_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified')`
-  ).run(id, youtubeChannelId, id, name, '@oldhandle', 'https://dicebear.example/old.svg', 'old mock description', ownerUserId, newReferralCode());
-  db.prepare(
-    `INSERT INTO channel_stats (channel_id, subscribers, total_views, video_count) VALUES (?, ?, ?, ?)`
-  ).run(id, 12345, 99999, 42);
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified')`,
+    [id, youtubeChannelId, id, name, '@oldhandle', 'https://dicebear.example/old.svg', 'old mock description', ownerUserId, newReferralCode()]
+  );
+  await db.run('INSERT INTO channel_stats (channel_id, subscribers, total_views, video_count) VALUES (?, ?, ?, ?)', [id, 12345, 99999, 42]);
   return id;
 }
 
-test('refreshAllChannelStats replaces old (mock) data with the real API response, for every field', async () => {
+test('refreshChannelStats replaces old (mock) data with the real API response, for every field', async () => {
   process.env.YOUTUBE_API_KEY = 'test-key';
-  const channelId = makeChannelWithOldMockData('Old Mock Name', 'UCrealid123');
+  const channelId = await makeChannelWithOldMockData('Old Mock Name', 'UCrealid123');
 
   globalThis.fetch = (async () => ({
     ok: true,
@@ -58,22 +57,18 @@ test('refreshAllChannelStats replaces old (mock) data with the real API response
   })) as unknown as typeof fetch;
 
   const logs: string[] = [];
-  const result = await refreshAllChannelStats(db, (m) => logs.push(m));
+  const result = await refreshChannelStats(db, { log: (m) => logs.push(m) });
 
   assert.equal(result.updated, 1);
   assert.equal(result.failed, 0);
 
-  const channel = db
-    .prepare('SELECT name, handle, avatar_url as avatarUrl, description FROM channels WHERE id = ?')
-    .get(channelId) as { name: string; handle: string; avatarUrl: string; description: string };
+  const channel = (await db.first<{ name: string; handle: string; avatarUrl: string; description: string }>('SELECT name, handle, avatar_url as avatarUrl, description FROM channels WHERE id = ?', [channelId]))!;
   assert.equal(channel.name, 'The Real Channel Name');
   assert.equal(channel.handle, '@realhandle');
   assert.equal(channel.avatarUrl, 'https://yt3.example/real-avatar.jpg');
   assert.equal(channel.description, 'A real, non-mock description.');
 
-  const stats = db
-    .prepare('SELECT subscribers, total_views as totalViews, video_count as videoCount FROM channel_stats WHERE channel_id = ?')
-    .get(channelId) as { subscribers: number; totalViews: number; videoCount: number };
+  const stats = (await db.first<{ subscribers: number; totalViews: number; videoCount: number }>('SELECT subscribers, total_views as totalViews, video_count as videoCount FROM channel_stats WHERE channel_id = ?', [channelId]))!;
   assert.equal(stats.subscribers, 2_500_000);
   assert.equal(stats.totalViews, 80_000_000);
   assert.equal(stats.videoCount, 410);
@@ -81,13 +76,11 @@ test('refreshAllChannelStats replaces old (mock) data with the real API response
   assert.ok(logs.some((l) => l.includes('The Real Channel Name')));
 });
 
-test('refreshAllChannelStats leaves bidding/verification/referral_code completely untouched', async () => {
+test('refreshChannelStats leaves bidding/verification/referral_code completely untouched', async () => {
   process.env.YOUTUBE_API_KEY = 'test-key';
-  const channelId = makeChannelWithOldMockData('Untouched Fields Test', 'UCuntouched1');
+  const channelId = await makeChannelWithOldMockData('Untouched Fields Test', 'UCuntouched1');
 
-  const before = db
-    .prepare('SELECT referral_code as referralCode, verification_status as verificationStatus FROM channels WHERE id = ?')
-    .get(channelId) as { referralCode: string; verificationStatus: string };
+  const before = (await db.first<{ referralCode: string; verificationStatus: string }>('SELECT referral_code as referralCode, verification_status as verificationStatus FROM channels WHERE id = ?', [channelId]))!;
 
   globalThis.fetch = (async () => ({
     ok: true,
@@ -103,20 +96,18 @@ test('refreshAllChannelStats leaves bidding/verification/referral_code completel
     }),
   })) as unknown as typeof fetch;
 
-  await refreshAllChannelStats(db, () => {});
+  await refreshChannelStats(db, {});
 
-  const after = db
-    .prepare('SELECT referral_code as referralCode, verification_status as verificationStatus FROM channels WHERE id = ?')
-    .get(channelId) as { referralCode: string; verificationStatus: string };
+  const after = (await db.first<{ referralCode: string; verificationStatus: string }>('SELECT referral_code as referralCode, verification_status as verificationStatus FROM channels WHERE id = ?', [channelId]))!;
 
   assert.equal(after.referralCode, before.referralCode);
   assert.equal(after.verificationStatus, before.verificationStatus);
 });
 
-test('refreshAllChannelStats stops early on a quota/key error instead of burning through every channel', async () => {
+test('refreshChannelStats stops early on a quota/key error instead of burning through every channel', async () => {
   process.env.YOUTUBE_API_KEY = 'test-key';
-  makeChannelWithOldMockData('First Channel', 'UCfirst1');
-  makeChannelWithOldMockData('Second Channel', 'UCsecond2');
+  await makeChannelWithOldMockData('First Channel', 'UCfirst1');
+  await makeChannelWithOldMockData('Second Channel', 'UCsecond2');
 
   let callCount = 0;
   globalThis.fetch = (async () => {
@@ -128,7 +119,7 @@ test('refreshAllChannelStats stops early on a quota/key error instead of burning
     };
   }) as unknown as typeof fetch;
 
-  const result = await refreshAllChannelStats(db, () => {});
+  const result = await refreshChannelStats(db, {});
 
   assert.equal(result.stoppedEarly, true);
   assert.equal(callCount, 1, 'should stop after the first quota error rather than retrying for every channel');
@@ -136,7 +127,5 @@ test('refreshAllChannelStats stops early on a quota/key error instead of burning
 
 test.after(() => {
   db.close();
-  fs.rmSync(process.env.SQLITE_PATH!, { force: true });
-  fs.rmSync(`${process.env.SQLITE_PATH}-wal`, { force: true });
-  fs.rmSync(`${process.env.SQLITE_PATH}-shm`, { force: true });
+  setDb(null);
 });

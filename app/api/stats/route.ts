@@ -1,16 +1,16 @@
 import { NextResponse } from 'next/server';
 import { countLiveVisitors, countTotalChannels } from '@/lib/presence-service';
+import { jsonError, NO_STORE } from '@/lib/http';
 
-// Without this, Next.js has no signal that this route reads live data (no
-// cookies/headers/request usage) and will statically prerender it at build
-// time — silently freezing the counts forever. Confirmed this was actually
-// happening: it showed up as "○ (Static)" in the build output before this
-// line was added.
+// Reads live data on every request — never prerender or cache.
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
-  return NextResponse.json({
-    liveVisitors: countLiveVisitors(),
-    totalChannels: countTotalChannels(),
-  });
+  try {
+    const [liveVisitors, totalChannels] = await Promise.all([countLiveVisitors(), countTotalChannels()]);
+    return NextResponse.json({ liveVisitors, totalChannels }, { headers: NO_STORE });
+  } catch (e) {
+    console.error('[api/stats]', e);
+    return jsonError('Stats are temporarily unavailable.', 503);
+  }
 }

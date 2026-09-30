@@ -1,4 +1,4 @@
-import { db } from '@/db';
+import { getDb, type SqlParam } from '@/db';
 import { newId } from './ids';
 import { minIncrementCents, minBidCents } from './settings';
 
@@ -65,9 +65,9 @@ const BASE_QUERY = `
  *  current total plus the configured minimum increment ($1 by default).
  *  Used both for display (every leaderboard row's "claim this rank for $X")
  *  and for the actual payment quote, so they can never disagree. */
-function computeClaimPrice(currentTotalCents: number): number {
-  if (currentTotalCents <= 0) return minBidCents();
-  return currentTotalCents + minIncrementCents();
+function computeClaimPrice(currentTotalCents: number, minBid: number, minIncrement: number): number {
+  if (currentTotalCents <= 0) return minBid;
+  return currentTotalCents + minIncrement;
 }
 
 /**
@@ -81,29 +81,31 @@ function computeClaimPrice(currentTotalCents: number): number {
  * current_rank is a display cache only, refreshed by rebuildRankCache
  * below, and is always re-derivable from this query.)
  */
-export function getLeaderboard(filter: LeaderboardFilter = {}): LeaderboardEntry[] {
+export async function getLeaderboard(filter: LeaderboardFilter = {}): Promise<LeaderboardEntry[]> {
+  const db = await getDb();
   const clauses: string[] = [];
-  const params: Record<string, unknown> = {};
+  const params: SqlParam[] = [];
 
   if (filter.category) {
-    clauses.push('AND c.category_slug = @category');
-    params.category = filter.category;
+    clauses.push('AND c.category_slug = ?');
+    params.push(filter.category);
   }
   if (filter.country) {
-    clauses.push('AND c.country_code = @country');
-    params.country = filter.country;
+    clauses.push('AND c.country_code = ?');
+    params.push(filter.country);
   }
 
-  const limit = Math.min(filter.limit ?? 50, 200);
-  const offset = filter.offset ?? 0;
+  const limit = Math.max(1, Math.min(Math.floor(filter.limit ?? 50) || 50, 200));
+  const offset = Math.max(0, Math.floor(filter.offset ?? 0) || 0);
 
-  const rows = db
-    .prepare(
-      `${BASE_QUERY} ${clauses.join(' ')}
-       ORDER BY l.total_bid_cents DESC, l.seq ASC, c.created_at ASC
-       LIMIT @limit OFFSET @offset`
-    )
-    .all({ ...params, limit, offset }) as Omit<LeaderboardEntry, 'rank' | 'requiredToClaimCents'>[];
+  const rows = await db.all<Omit<LeaderboardEntry, 'rank' | 'requiredToClaimCents'>>(
+    `${BASE_QUERY} ${clauses.join(' ')}
+     ORDER BY l.total_bid_cents DESC, l.seq ASC, c.created_at ASC
+     LIMIT ? OFFSET ?`,
+    [...params, limit, offset]
+  );
+
+  const [minBid, minIncrement] = await Promise.all([minBidCents(), minIncrementCents()]);
 
   // Rank is positional within the *unfiltered global* ordering when no
   // filter is applied; within category/country when filtered, matching the
@@ -112,18 +114,18 @@ export function getLeaderboard(filter: LeaderboardFilter = {}): LeaderboardEntry
   return rows.map((row, i) => ({
     ...row,
     rank: offset + i + 1,
-    requiredToClaimCents: computeClaimPrice(row.totalBidCents),
+    requiredToClaimCents: computeClaimPrice(row.totalBidCents, minBid, minIncrement),
   }));
 }
 
-export function getChannelRank(channelId: string): { rank: number; totalBidCents: number } | null {
-  const listing = db
-    .prepare(
-      `SELECT l.total_bid_cents as totalBidCents, l.seq as seq, c.created_at as createdAt
-       FROM listings l JOIN channels c ON c.id = l.channel_id
-       WHERE l.channel_id = ?`
-    )
-    .get(channelId) as { totalBidCents: number; seq: number; createdAt: string } | undefined;
+export async function getChannelRank(channelId: string): Promise<{ rank: number; totalBidCents: number } | null> {
+  const db = await getDb();
+  const listing = await db.first<{ totalBidCents: number; seq: number; createdAt: string }>(
+    `SELECT l.total_bid_cents as totalBidCents, l.seq as seq, c.created_at as createdAt
+     FROM listings l JOIN channels c ON c.id = l.channel_id
+     WHERE l.channel_id = ?`,
+    [channelId]
+  );
   if (!listing) return null;
 
   // Every channel with a listings row (i.e. every submitted channel) gets a
@@ -131,57 +133,79 @@ export function getChannelRank(channelId: string): { rank: number; totalBidCents
   // rule exactly (bid DESC, then seq ASC, then created_at ASC) so a
   // channel's own profile page and the homepage never disagree about its
   // position.
-  const better = db
-    .prepare(
-      `SELECT count(*) as n FROM listings l
-       JOIN channels c ON c.id = l.channel_id
-       WHERE c.moderation_status = 'approved' AND c.is_available = 1
-       AND (
-         l.total_bid_cents > @total
-         OR (l.total_bid_cents = @total AND l.seq < @seq)
-         OR (l.total_bid_cents = @total AND l.seq = @seq AND c.created_at < @createdAt)
-       )`
-    )
-    .get({ total: listing.totalBidCents, seq: listing.seq, createdAt: listing.createdAt }) as { n: number };
+  const better = await db.first<{ n: number }>(
+    `SELECT count(*) as n FROM listings l
+     JOIN channels c ON c.id = l.channel_id
+     WHERE c.moderation_status = 'approved' AND c.is_available = 1
+     AND (
+       l.total_bid_cents > ?
+       OR (l.total_bid_cents = ? AND l.seq < ?)
+       OR (l.total_bid_cents = ? AND l.seq = ? AND c.created_at < ?)
+     )`,
+    [
+      listing.totalBidCents,
+      listing.totalBidCents,
+      listing.seq,
+      listing.totalBidCents,
+      listing.seq,
+      listing.createdAt,
+    ]
+  );
 
-  return { rank: better.n + 1, totalBidCents: listing.totalBidCents };
+  return { rank: (better?.n ?? 0) + 1, totalBidCents: listing.totalBidCents };
 }
 
 /** What a channel would need to reach a given rank right now. Advisory only —
  *  re-validated server-side again at payment time (see BiddingService.quote). */
-export function requiredTotalForRank(targetRank: number, filter: LeaderboardFilter = {}): number {
-  if (targetRank <= 1) {
-    const top = getLeaderboard({ ...filter, limit: 1 })[0];
-    return computeClaimPrice(top?.totalBidCents ?? 0);
+export async function requiredTotalForRank(targetRank: number, filter: LeaderboardFilter = {}): Promise<number> {
+  const [minBid, minIncrement] = await Promise.all([minBidCents(), minIncrementCents()]);
+  const rank = Math.max(1, Math.floor(targetRank) || 1);
+  if (rank <= 1) {
+    const top = (await getLeaderboard({ ...filter, limit: 1 }))[0];
+    return computeClaimPrice(top?.totalBidCents ?? 0, minBid, minIncrement);
   }
-  const aboveTarget = getLeaderboard({ ...filter, limit: targetRank, offset: 0 });
-  const channelCurrentlyAtTarget = aboveTarget[targetRank - 1];
-  return computeClaimPrice(channelCurrentlyAtTarget?.totalBidCents ?? 0);
+  const aboveTarget = await getLeaderboard({ ...filter, limit: rank, offset: 0 });
+  const channelCurrentlyAtTarget = aboveTarget[rank - 1];
+  return computeClaimPrice(channelCurrentlyAtTarget?.totalBidCents ?? 0, minBid, minIncrement);
 }
 
 /** Rebuilds the cached rank columns on `listings` for display purposes
  *  (dashboard "current rank" without a live join everywhere). Safe to run
  *  any time — it is derived entirely from `bids`/`listings`, never the
- *  other way around. Intended to run after every bid and on a schedule. */
-export function rebuildRankCache(): void {
-  const all = getLeaderboard({ limit: 200 });
-  const update = db.prepare(
-    `UPDATE listings SET
-       current_rank = @rank,
-       highest_rank = CASE WHEN highest_rank IS NULL OR @rank < highest_rank THEN @rank ELSE highest_rank END,
-       lowest_rank = CASE WHEN lowest_rank IS NULL OR @rank > lowest_rank THEN @rank ELSE lowest_rank END
-     WHERE channel_id = @channelId`
+ *  other way around. Intended to run after every bid and on a schedule.
+ *
+ *  One set-based statement (window function) rather than a per-row loop:
+ *  D1 has no interactive transactions, and this keeps the whole rebuild a
+ *  single atomic write no matter how many channels exist. */
+export async function rebuildRankCache(): Promise<void> {
+  const db = await getDb();
+  await db.run(
+    `WITH ranked AS MATERIALIZED (
+       SELECT l.channel_id AS cid,
+              ROW_NUMBER() OVER (ORDER BY l.total_bid_cents DESC, l.seq ASC, c.created_at ASC) AS rk
+       FROM listings l JOIN channels c ON c.id = l.channel_id
+       WHERE c.moderation_status = 'approved' AND c.is_available = 1
+     )
+     UPDATE listings SET
+       current_rank = (SELECT rk FROM ranked WHERE cid = listings.channel_id),
+       highest_rank = CASE
+         WHEN highest_rank IS NULL OR (SELECT rk FROM ranked WHERE cid = listings.channel_id) < highest_rank
+           THEN (SELECT rk FROM ranked WHERE cid = listings.channel_id) ELSE highest_rank END,
+       lowest_rank = CASE
+         WHEN lowest_rank IS NULL OR (SELECT rk FROM ranked WHERE cid = listings.channel_id) > lowest_rank
+           THEN (SELECT rk FROM ranked WHERE cid = listings.channel_id) ELSE lowest_rank END
+     WHERE channel_id IN (SELECT cid FROM ranked)`
   );
-  const tx = db.transaction((entries: LeaderboardEntry[]) => {
-    for (const entry of entries) update.run({ rank: entry.rank, channelId: entry.channelId });
-  });
-  tx(all);
 }
 
-export function recordRankHistory(channelId: string, rank: number, totalBidCents: number): void {
-  db.prepare(
-    `INSERT INTO rank_history (id, channel_id, rank, total_bid_cents) VALUES (?, ?, ?, ?)`
-  ).run(newId('rh'), channelId, rank, totalBidCents);
+export async function recordRankHistory(channelId: string, rank: number, totalBidCents: number): Promise<void> {
+  const db = await getDb();
+  await db.run(`INSERT INTO rank_history (id, channel_id, rank, total_bid_cents) VALUES (?, ?, ?, ?)`, [
+    newId('rh'),
+    channelId,
+    rank,
+    totalBidCents,
+  ]);
 }
 
 export interface ReferralLeaderboardEntry {
@@ -202,16 +226,17 @@ export interface ReferralLeaderboardEntry {
  * only, never engagement/traffic metrics. This exists purely as a second,
  * clearly-labeled scoreboard alongside the real one.
  */
-export function getReferralLeaderboard(limit = 20): ReferralLeaderboardEntry[] {
-  const rows = db
-    .prepare(
-      `SELECT id as channelId, name, handle, slug, avatar_url as avatarUrl, referred_visits as referredVisits
-       FROM channels
-       WHERE referred_visits > 0 AND moderation_status = 'approved' AND is_available = 1
-       ORDER BY referred_visits DESC, created_at ASC
-       LIMIT ?`
-    )
-    .all(Math.min(limit, 100)) as Omit<ReferralLeaderboardEntry, 'rank'>[];
+export async function getReferralLeaderboard(limit = 20): Promise<ReferralLeaderboardEntry[]> {
+  const db = await getDb();
+  const n = Math.max(1, Math.min(Math.floor(limit) || 20, 100));
+  const rows = await db.all<Omit<ReferralLeaderboardEntry, 'rank'>>(
+    `SELECT id as channelId, name, handle, slug, avatar_url as avatarUrl, referred_visits as referredVisits
+     FROM channels
+     WHERE referred_visits > 0 AND moderation_status = 'approved' AND is_available = 1
+     ORDER BY referred_visits DESC, created_at ASC
+     LIMIT ?`,
+    [n]
+  );
 
   return rows.map((row, i) => ({ ...row, rank: i + 1 }));
 }

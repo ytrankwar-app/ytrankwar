@@ -32,19 +32,18 @@ export function ClaimRankModal({
   targetRank,
   contextLabel,
   onClose,
-  onSuccess,
 }: {
   targetRank: number;
   contextLabel: string;
   onClose: () => void;
-  onSuccess: () => void;
+  /** Kept for API compatibility: payment now completes on Dodo's hosted page and returns to /payment/return. */
+  onSuccess?: () => void;
 }) {
   const [channels, setChannels] = useState<MyChannel[] | null>(null);
   const [selectedId, setSelectedId] = useState<string>('');
   const [quote, setQuote] = useState<Quote | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [phase, setPhase] = useState<'pick' | 'quote' | 'awaiting-payment' | 'done'>('pick');
-  const [paymentId, setPaymentId] = useState<string | null>(null);
+  const [phase, setPhase] = useState<'pick' | 'quote' | 'redirecting'>('pick');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -95,37 +94,27 @@ export function ClaimRankModal({
     if (!selectedChannel) return;
     setBusy(true);
     setError(null);
-    const res = await fetch('/api/payments/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channelId: selectedId, desiredRank: targetRank }),
-    });
-    const data = await res.json();
-    setBusy(false);
-    if (!res.ok) {
-      setError(data.error || 'Something went wrong.');
-      return;
+    try {
+      const res = await fetch('/api/payments/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channelId: selectedId, desiredRank: targetRank }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.checkoutUrl) {
+        setError(data.error || 'Something went wrong. You have not been charged.');
+        setBusy(false);
+        return;
+      }
+      // Hand off to Dodo Payments' secure hosted checkout. The bid is applied
+      // by the server once Dodo confirms the payment, then the customer is
+      // returned to /payment/return.
+      setPhase('redirecting');
+      window.location.assign(data.checkoutUrl);
+    } catch {
+      setError('Network error. You have not been charged — please try again.');
+      setBusy(false);
     }
-    setPaymentId(data.paymentId);
-    setPhase('awaiting-payment');
-  }
-
-  async function simulatePayment(success: boolean) {
-    if (!paymentId) return;
-    setBusy(true);
-    const res = await fetch('/api/payments/webhook', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paymentId, success }),
-    });
-    const data = await res.json();
-    setBusy(false);
-    if (!res.ok || !success || !data.applied) {
-      setError(data.error || 'Payment could not be completed. No bid was created.');
-      return;
-    }
-    setPhase('done');
-    setTimeout(onSuccess, 900);
   }
 
   return (
@@ -189,21 +178,7 @@ export function ClaimRankModal({
           </>
         )}
 
-        {phase === 'awaiting-payment' && (
-          <>
-            <p className="muted">
-              In production this hands off to Stripe Checkout. This demo simulates the provider's webhook callback
-              instead of a real card form.
-            </p>
-            {error && <p style={{ color: 'var(--danger)' }}>{error}</p>}
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              <button className="btn btn-danger" disabled={busy} onClick={() => simulatePayment(false)}>Simulate failure</button>
-              <button className="btn btn-primary" disabled={busy} onClick={() => simulatePayment(true)}>Simulate successful payment</button>
-            </div>
-          </>
-        )}
-
-        {phase === 'done' && <p>Payment confirmed — your bid is live on the leaderboard.</p>}
+        {phase === 'redirecting' && <p className="muted">Taking you to Dodo Payments' secure checkout…</p>}
       </div>
     </div>
   );

@@ -1,14 +1,20 @@
 import type { MetadataRoute } from 'next';
+import { getSiteUrl } from '@/lib/site';
 
-const SITE_URL = process.env.SITE_URL || 'https://ytrankwar.example';
+// Built per request so the sitemap URL always matches the domain serving it.
+export const dynamic = 'force-dynamic';
 
-export default function robots(): MetadataRoute.Robots {
+export default async function robots(): Promise<MetadataRoute.Robots> {
+  const base = await getSiteUrl();
   return {
     rules: {
       userAgent: '*',
       allow: '/',
-      disallow: ['/api/'],
+      // API endpoints, referral redirects and per-customer payment pages are
+      // not content and should never be indexed.
+      disallow: ['/api/', '/r/', '/payment/'],
     },
-    sitemap: `${SITE_URL}/sitemap.xml`,
+    sitemap: `${base}/sitemap.xml`,
+    host: base,
   };
 }

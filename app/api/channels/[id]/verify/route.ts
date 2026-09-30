@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { submitCommunityPostProof, VerificationError } from '@/lib/verification-service';
-import { db } from '@/db';
+import { getDb } from '@/db';
+import { isPlausibleId, jsonError } from '@/lib/http';
+
+export const dynamic = 'force-dynamic';
 
 // Real ownership verification (Method B from the spec): the owner posts
 // their channel's referral link to its YouTube Community tab, then submits
@@ -8,25 +11,23 @@ import { db } from '@/db';
 // endpoint — the proof itself is the gate, since only the real channel
 // owner can post to that channel's own Community tab. See
 // lib/verification-service.ts for exactly what is and isn't actually
-// checked in this demo (no live YouTube API access).
+// checked (no live YouTube API access to Community posts).
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
-  const body = await req.json().catch(() => ({}));
-
-  const channel = db
-    .prepare(
-      'SELECT handle, youtube_channel_id as youtubeChannelId, referral_code as referralCode FROM channels WHERE id = ?'
-    )
-    .get(params.id) as { handle: string | null; youtubeChannelId: string; referralCode: string | null } | undefined;
-
-  if (!channel) return NextResponse.json({ error: "We couldn't find that channel." }, { status: 404 });
-
-  const postUrl = String(body.postUrl || '').trim();
-  if (!postUrl) {
-    return NextResponse.json({ error: 'Paste the link to your YouTube Community post.' }, { status: 400 });
-  }
+  if (!isPlausibleId(params.id)) return jsonError("We couldn't find that channel.", 404);
+  const body = (await req.json().catch(() => ({}))) as { postUrl?: unknown };
 
   try {
-    submitCommunityPostProof({
+    const db = await getDb();
+    const channel = await db.first<{ handle: string | null; youtubeChannelId: string; referralCode: string | null }>(
+      'SELECT handle, youtube_channel_id as youtubeChannelId, referral_code as referralCode FROM channels WHERE id = ?',
+      [params.id]
+    );
+    if (!channel) return jsonError("We couldn't find that channel.", 404);
+
+    const postUrl = String(body.postUrl || '').trim().slice(0, 500);
+    if (!postUrl) return jsonError('Paste the link to your YouTube Community post.', 400);
+
+    await submitCommunityPostProof({
       channelId: params.id,
       postUrl,
       referralCode: channel.referralCode ?? '',
@@ -35,7 +36,8 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     });
     return NextResponse.json({ ok: true });
   } catch (e) {
-    if (e instanceof VerificationError) return NextResponse.json({ error: e.message, code: e.code }, { status: 400 });
-    throw e;
+    if (e instanceof VerificationError) return jsonError(e.message, 400, e.code);
+    console.error('[api/channels/:id/verify]', e);
+    return jsonError('Verification is temporarily unavailable.', 503);
   }
 }

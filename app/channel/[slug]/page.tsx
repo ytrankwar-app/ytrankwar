@@ -4,7 +4,8 @@ import { getChannelBySlug } from '@/lib/channel-service';
 import { getChannelRank } from '@/lib/leaderboard-service';
 import { getVerificationInfo } from '@/lib/verification-service';
 import { centsToDisplay } from '@/lib/money';
-import { db } from '@/db';
+import { getDb } from '@/db';
+import { getSiteUrl } from '@/lib/site';
 import { ChannelActions } from '@/components/ChannelActions';
 import { VisitYouTubeButton } from '@/components/VisitYouTubeButton';
 import { ReferralSection } from '@/components/ReferralSection';
@@ -18,6 +19,7 @@ interface ChannelRow {
   avatarUrl: string | null;
   description: string | null;
   verification_status: string;
+  moderationStatus: string;
   referralCode: string | null;
   referredVisits: number;
   categorySlug: string | null;
@@ -34,23 +36,30 @@ interface ChannelRow {
   bidCount: number | null;
 }
 
-function loadChannel(slug: string) {
-  const channel = getChannelBySlug(slug) as ChannelRow | undefined;
-  if (!channel) return null;
-  const rank = getChannelRank(channel.id);
-  const bidHistory = db
-    .prepare(
+// The layout and this page read live data on every request (rank and bids
+// change constantly), so never prerender them at build time.
+export const dynamic = 'force-dynamic';
+
+async function loadChannel(slug: string) {
+  if (!/^[a-z0-9-]{1,120}$/i.test(slug)) return null;
+  const channel = (await getChannelBySlug(slug)) as ChannelRow | null;
+  if (!channel || channel.moderationStatus === 'removed') return null;
+  const db = await getDb();
+  const [rank, bidHistory] = await Promise.all([
+    getChannelRank(channel.id),
+    db.all<{ amountAddedCents: number; totalBidAfterCents: number; rankAfter: number | null; createdAt: string }>(
       `SELECT amount_added_cents as amountAddedCents, total_bid_after_cents as totalBidAfterCents,
               rank_after as rankAfter, created_at as createdAt
-       FROM bids WHERE channel_id = ? ORDER BY created_at DESC LIMIT 15`
-    )
-    .all(channel.id) as { amountAddedCents: number; totalBidAfterCents: number; rankAfter: number | null; createdAt: string }[];
+       FROM bids WHERE channel_id = ? ORDER BY created_at DESC LIMIT 15`,
+      [channel.id]
+    ),
+  ]);
   return { channel, rank, bidHistory };
 }
 
-export function generateMetadata({ params }: { params: { slug: string } }): Metadata {
-  const data = loadChannel(params.slug);
-  if (!data) return { title: 'Channel not found — ytrankwar' };
+export async function generateMetadata({ params }: { params: { slug: string } }): Promise<Metadata> {
+  const data = await loadChannel(params.slug);
+  if (!data) return { title: 'Channel not found', robots: { index: false } };
   const { channel, rank } = data;
   const title = `${channel.name} YouTube Channel Ranking — Current Rank & Profile`;
   const description = `View ${channel.name}'s YouTube channel profile, current leaderboard position${rank ? ` (#${rank.rank})` : ''}, bid history, statistics and ranking history on ytrankwar.`;
@@ -62,19 +71,19 @@ export function generateMetadata({ params }: { params: { slug: string } }): Meta
   };
 }
 
-export default function ChannelProfilePage({
+export default async function ChannelProfilePage({
   params,
   searchParams,
 }: {
   params: { slug: string };
   searchParams: { claim?: string };
 }) {
-  const data = loadChannel(params.slug);
+  const data = await loadChannel(params.slug);
   if (!data) notFound();
   const { channel, rank, bidHistory } = data;
   const autoOpenBid = searchParams.claim === '1';
 
-  const siteUrl = process.env.SITE_URL || 'https://ytrankwar.example';
+  const siteUrl = await getSiteUrl();
   const verificationInfo = getVerificationInfo(
     {
       referralCode: channel.referralCode,

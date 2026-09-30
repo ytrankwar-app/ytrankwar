@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS payments (
   -- checkout time; informational only, never trusted for the real apply.
   quoted_total_cents INTEGER,
   quoted_rank     INTEGER,
-  provider        TEXT NOT NULL DEFAULT 'stripe',
+  provider        TEXT NOT NULL DEFAULT 'dodo',
   provider_ref    TEXT,
   status          TEXT NOT NULL DEFAULT 'created'
                     CHECK (status IN ('created','pending','paid','failed','cancelled','refunded','disputed')),

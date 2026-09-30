@@ -1,0 +1,8 @@
+# Copy to .dev.vars for local `npm run dev` / `npm run cf:preview`.
+# (Wrangler and OpenNext read this file locally; never commit .dev.vars.)
+SITE_URL=http://ytrankwar.lol
+YOUTUBE_API_KEY=AIzaSyCvay7Jokbgqo27RwYsxdRmPUduA0x_lTs
+DODO_PAYMENTS_API_KEY=HOiso7LFVP0J87_l.L-lgQdETAIIaHu0NKyDWjnEBxIDTJoS3H5_m_AYqt88m2376
+DODO_PAYMENTS_WEBHOOK_KEY=
+DODO_PAYMENTS_ENVIRONMENT=production
+DODO_PRODUCT_ID=

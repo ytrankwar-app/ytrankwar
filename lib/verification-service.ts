@@ -1,5 +1,5 @@
 import { customAlphabet } from 'nanoid';
-import { db } from '@/db';
+import { getDb, NOW_SQL } from '@/db';
 import { newId } from './ids';
 
 // Alphabet excludes 0/O/1/I to avoid transcription mistakes if anyone
@@ -96,13 +96,13 @@ export function looksLikeOwnCommunityPost(url: string, handle: string | null, yo
  * reading the post back) is the only gate, since only the real channel
  * owner can post to that channel's own Community tab.
  */
-export function submitCommunityPostProof(params: {
+export async function submitCommunityPostProof(params: {
   channelId: string;
   postUrl: string;
   referralCode: string;
   handle: string | null;
   youtubeChannelId: string;
-}): void {
+}): Promise<void> {
   if (!looksLikeOwnCommunityPost(params.postUrl, params.handle, params.youtubeChannelId)) {
     throw new VerificationError(
       'invalid_proof',
@@ -110,18 +110,20 @@ export function submitCommunityPostProof(params: {
     );
   }
 
-  const channel = db.prepare('SELECT owner_user_id as ownerUserId FROM channels WHERE id = ?').get(params.channelId) as
-    | { ownerUserId: string }
-    | undefined;
+  const db = await getDb();
+  const channel = await db.first<{ ownerUserId: string }>(
+    'SELECT owner_user_id as ownerUserId FROM channels WHERE id = ?',
+    [params.channelId]
+  );
   if (!channel) throw new VerificationError('not_found', "We couldn't find that channel.");
 
-  const tx = db.transaction(() => {
-    db.prepare(
-      `INSERT INTO channel_ownership_tokens (id, channel_id, user_id, token, proof_url, status, resolved_at)
-       VALUES (?, ?, ?, ?, ?, 'verified', strftime('%Y-%m-%dT%H:%M:%fZ','now'))`
-    ).run(newId('tok'), params.channelId, channel.ownerUserId, params.referralCode, params.postUrl);
-
-    db.prepare(`UPDATE channels SET verification_status = 'verified' WHERE id = ?`).run(params.channelId);
-  });
-  tx();
+  // One atomic batch: the audit row and the status change land together.
+  await db.batch([
+    {
+      sql: `INSERT INTO channel_ownership_tokens (id, channel_id, user_id, token, proof_url, status, resolved_at)
+            VALUES (?, ?, ?, ?, ?, 'verified', ${NOW_SQL})`,
+      params: [newId('tok'), params.channelId, channel.ownerUserId, params.referralCode, params.postUrl.slice(0, 500)],
+    },
+    { sql: `UPDATE channels SET verification_status = 'verified' WHERE id = ?`, params: [params.channelId] },
+  ]);
 }
