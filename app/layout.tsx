@@ -57,6 +57,20 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   return (
     <html lang="en">
       <head>
+        {/* Google tag (gtag.js) */}
+        <script async src="https://www.googletagmanager.com/gtag/js?id=G-VYVT5GLSMG" />
+        {/* eslint-disable-next-line react/no-danger */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-VYVT5GLSMG');
+`,
+          }}
+        />
         <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
         <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
         <link rel="shortcut icon" href="/favicon.ico" />
@@ -82,9 +96,6 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               </p>
               <nav className="footer-links" aria-label="Footer">
                 <Link href="/rules">Rules</Link>
-                <Link href="/policy">Policy</Link>
-                <Link href="/sitemap.xml" prefetch={false}>Sitemap</Link>
-                <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>
               </nav>
             </div>
           </div>
